@@ -36,6 +36,7 @@ services:
             - ./../vendor:/var/www/microservice-br/vendor
         networks:
             - microservice-br-network
+            - microservice-app-network
     microservice-br-mysql-service:
         image: mysql
         container_name: microservice-br-mysql-container
@@ -76,9 +77,13 @@ services:
             - ./docker-conf/rabbitmq/log/:/var/log/rabbitmq
         networks:
             - microservice-br-network
+            - microservice-app-network
 networks:
     microservice-br-network:
         driver: bridge
+    microservice-app-network:
+        driver: bridge
+        external: true
 
 
 $ vi docker/nginx/default.conf
