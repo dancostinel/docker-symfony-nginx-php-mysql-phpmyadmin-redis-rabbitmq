@@ -1,0 +1,886 @@
+==============================================================
+
+0. config docker project config
+
+$ cd /Users/dancostinel/Document/docker/dan/microservices/microservice-br
+$ git clone https://github.com/dancostinel/docker-empty-symfony6-nginx-php8.2-mysql8-phpmyadmin.git .
+OBS on github, create a new private repo, dancostinel/microservice-br with no files added, and replace main with master branch
+$ rm -rf .git
+$ git init
+$ git remote add origin https://github.com/dancostinel/microservice-br.git
+$ git branch -M master
+
+$ vi docker/docker-compose.yaml
+version: '3'
+volumes:
+    mysql_data:
+services:
+    microservice-br-nginx-service:
+        build:
+            context: .
+            dockerfile: ./nginx/Dockerfile
+        container_name: microservice-br-nginx-container
+        volumes:
+            - ./../:/var/www/microservice-br/
+        ports: ['8101:80']
+        networks:
+            - microservice-br-network
+    microservice-br-php-service:
+        build:
+            context: .
+            dockerfile: ./php/Dockerfile
+        container_name: microservice-br-php-container
+        ports: ['9101:9000']
+        volumes:
+            - ./../:/var/www/microservice-br/
+            - ./../vendor:/var/www/microservice-br/vendor
+        networks:
+            - microservice-br-network
+    microservice-br-mysql-service:
+        image: mysql
+        container_name: microservice-br-mysql-container
+        command: ['--character-set-server=utf8mb4', '--collation-server=utf8mb4_unicode_ci', '--authentication_policy=mysql_native_password']
+        environment:
+            MYSQL_ROOT_PASSWORD: root
+        ports: ['3101:3306']
+        volumes:
+            - ./mysql:/var/lib/mysql
+        networks:
+            - microservice-br-network
+    microservice-br-phpmyadmin-service:
+        image: phpmyadmin/phpmyadmin:latest
+        container_name: microservice-br-phpmyadmin-container
+        environment:
+            PMA_HOST: microservice-br-mysql-service
+            PMA_USER: root
+            PMA_PASSWORD: root
+        ports: ['7101:80']
+        depends_on:
+            - microservice-br-mysql-service
+        volumes:
+            - ./phpmyadmin/:/var/www/microservice-br/docker/phpmyadmin/
+        networks:
+            - microservice-br-network
+    microservice-br-redis-service:
+        image: library/redis:alpine
+        container_name: microservice-br-redis-container
+        tty: true
+        networks:
+            - microservice-br-network
+    microservice-br-rabbitmq-service:
+        image: rabbitmq:3-management-alpine
+        container_name: microservice-br-rabbitmq-container
+        ports: [ '5672:5672', '15672:15672' ]
+        volumes:
+            - ./docker-conf/rabbitmq/data/:/var/lib/rabbitmq/
+            - ./docker-conf/rabbitmq/log/:/var/log/rabbitmq
+        networks:
+            - microservice-br-network
+networks:
+    microservice-br-network:
+        driver: bridge
+
+
+$ vi docker/nginx/default.conf
+server {
+    listen 80;
+    server_name localhost;
+    root /var/www/microservice-br/public;
+
+    location / {
+        try_files $uri /index.php$is_args$args;
+    }
+
+    location ~ ^/index\.php(/|$) {
+        fastcgi_pass microservice-br-php-container:9000;
+        fastcgi_split_path_info ^(.+\.php)(/.*)$;
+
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+        fastcgi_param DOCUMENT_ROOT $realpath_root;
+        internal;
+    }
+
+    location ~ \.php$ {
+        return 404;
+    }
+
+    error_log  /var/log/nginx/error.log;
+    access_log /var/log/nginx/access.log;
+}
+
+
+$ vi docker/php/Dockerfile
+FROM php:8.2.0-fpm
+RUN apt-get update && apt-get install apt-file -y && apt-file update && apt-get install vim -y --no-install-recommends \
+        git \
+        zlib1g-dev \
+        libxml2-dev \
+        libzip-dev \
+    && docker-php-ext-install \
+        zip \
+        intl \
+        mysqli \
+        pdo pdo_mysql
+
+RUN curl -sS https://getcomposer.org/installer | php && mv composer.phar /usr/local/bin/composer
+WORKDIR /var/www/microservice-br/
+
+
+$ vi .env
+APP_ENV=dev
+APP_SECRET=a6de592e911f08e887f05ff4f077b74b
+DATABASE_URL="mysql://root:root@microservice-br-mysql-container:3306/microservice-br-db"
+MESSENGER_TRANSPORT_DSN=doctrine://default?auto_setup=0
+MAILER_DSN=null://null
+APP_TIMEZONE=Europe/Bucharest
+
+
+$ git add .
+$ git commit -m "init"
+$ git push origin master
+$ docker compose -f docker/docker-compose.yaml up -d
+$ docker compose -f docker/docker-compose.yaml up -d --build --force-recreate
+IF I WANT TO SEE LOGS: docker compose -f docker/docker-compose.yaml up --build --force-recreate
+
+
+$ docker exec -it microservice-br-php-container bash
+# composer ins
+# php bin/console doctrine:database:create
+
+
+$ access: localhost:8101 app
+$ access: localhost:7101 phpmyadmin
+
+==============================================================
+1. config monolog config
+
+MONOLOG CREATE NEW LOG FILE START
+
+git branch: monolog
+### microservice-br/config/packages/monolog.yaml
+monolog:
+    channels:
+        - rabbit_br   #LoggerInterface $rabbitBrLogger
+        - rabbit_sap  #LoggerInterface $rabbitSapLogger
+
+when@dev:
+    monolog:
+        handlers:
+            rabbit_br:
+                type: stream
+                path: '%kernel.logs_dir%/rabbit_br.log'
+                level: debug
+                channels: ["rabbit_br"]
+                formatter: 'monolog.formatter.json'
+            rabbit_sap:
+                type: stream
+                path: '%kernel.logs_dir%/rabbit_sap.log'
+                level: debug
+                channels: ["rabbit_sap"]
+                formatter: 'monolog.formatter.json'
+
+### src/Service/TestRabbitSapService.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Service;
+
+use App\RabbitMQ\Producer\TestSapProducer;
+use Psr\Log\LoggerInterface;
+
+readonly class TestRabbitSapService
+{
+    public function __construct(
+        private LoggerInterface $rabbitBrLogger,
+        private TestSapProducer $testSapProducer
+    ) {
+    }
+
+    public function testing(): void
+    {
+        $message = json_encode(['test-br' => 'br-for-sap2']);
+        $this->testSapProducer->publish($message);
+        $this->rabbitBrLogger->notice('A new RabbitMQ SAP message was published '.$message);
+    }
+}
+
+### src/Service/TestRabbitService.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Service;
+
+use App\RabbitMQ\Producer\TestProducer;
+use Psr\Log\LoggerInterface;
+
+readonly class TestRabbitService
+{
+    public function __construct(
+        private LoggerInterface $rabbitBrLogger,
+        private TestProducer $testProducer
+    ) {
+    }
+
+    public function testing(): void
+    {
+        $message = json_encode(['br' => 'br-name44']);
+        $this->testProducer->publish($message);
+        $this->rabbitBrLogger->notice('A new RabbitMQ BR message was published '.$message);
+    }
+}
+
+### in browser access: http://localhost:8101/testing-rabbit-mq
+### in browser access: http://localhost:15672/#/queues/%2F/testing-queue
+
+### docker exec -it microservice-br-php-container bash
+php bin/console rabbitmq:consumer test
+
+OBS a new file is created in var/log/ with rabbit_br.log name WHICH WILL STORE LOGS LIKE THIS:
+{"message":"A new RabbitMQ BR message was published {\"br\":\"br-name44\"}","context":{},"level":250,"level_name":"NOTICE","channel":"rabbit_br","datetime":"2023-12-19T21:02:35.906514+02:00","extra":{}}
+
+MONOLOG CREATE NEW LOG FILE END
+
+==============================================================
+
+CONNECT ONE CONTAINER FROM A NETWORK WITH ANOTHER CONTAINER FROM ANOTHER NETWORK:
+https://twig2let.github.io/docker/docker_networkBetweenMultipleDockerComposeServices.html
+https://stackoverflow.com/questions/12822403/symfony2-and-rabbitmqbundle-cant-publish-a-message - example of producer-consumer configuration file
+https://medium.com/q-software/symfony-and-rabbitmq-86b14dd604b1
+
+OBS i want to connect microservice-br-rabbitmq-container with microservice-sap-rabbitmq-container
+STEP1 i MUST create the common network by typing:
+$ docker network create -d bridge microservice-app-network
+$ docker network ls
+IF THIS COMMON NETWORK IS NOT CREATED LIKE SO, AN ERROR WILL BE THROWN WHEN TRYING TO up -d ONE OF THE CONTAINERS FROM EITHER APP
+network microservice-app-network declared as external, but could not be found
+STEP2
+cd microservice-br/
+docker compose -f docker/docker-compose.yaml up -d
+
+cd microservice-sap/
+docker compose -f docker/docker-compose.yaml up -d
+
+
+
+
+STEP3
+### microservice-br/docker/docker-compose.yaml
+services:
+    //...
+    microservice-br-php-service:
+        //...
+        networks:
+            - microservice-br-network
+            - microservice-app-network
+    microservice-br-rabbitmq-service:
+        //...
+        networks:
+            - microservice-br-network
+            - microservice-app-network
+networks:
+    //...
+    microservice-app-network:
+        driver: bridge
+        external: true
+
+### microservice-br/config/packages/old_sound_rabbit_mq.yaml
+old_sound_rabbit_mq:
+    //...
+    producers:
+        //...
+        test-sap-producer:
+            connection: default
+            exchange_options: { name: 'testing-sap-exchange', type: direct }
+            class: App\RabbitMQ\Producer\TestSapProducer
+
+### microservice-br/src/RabbitMQ/Producer/TestSapProducer.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\RabbitMQ\Producer;
+
+use OldSound\RabbitMqBundle\RabbitMq\Producer;
+
+class TestSapProducer extends Producer
+{
+}
+
+### microservice-br/src/Service/TestRabbitSapService.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Service;
+
+use App\RabbitMQ\Producer\TestSapProducer;
+
+readonly class TestRabbitSapService
+{
+    public function __construct(private TestSapProducer $testSapProducer)
+    {
+    }
+
+    public function testing(): void
+    {
+        $message = json_encode(['test-br' => 'br-for-sap1']);
+        $this->testSapProducer->publish($message);
+    }
+}
+
+### microservice-br/src/Controller/RabbitMQController.php
+#[Route('/testing-rabbit-mq-sap', name: 'testing_rabbitmq_sap_route', methods: 'GET')]
+public function testingRabbitMqSap(TestRabbitSapService $testRabbitSapService): JsonResponse
+{
+    $testRabbitSapService->testing();
+
+    return new JsonResponse(['sent' => 'oke']);
+}
+
+
+
+
+
+### microservice-sap : create a test db table to save the message from microservice-br
+$ docker exec -it microservice-sap-php-container bash
+php bin/console make:entity   #table name = TestRabbitMq, only field name varchar (255)
+
+$ php bin/console make:migration
+
+$ php bin/console doctrine:migrations:migrate
+
+### microservice-sap/docker/docker-compose.yaml
+    services:
+        //...
+        microservice-sap-php-service:
+            //...
+            networks:
+                - microservice-sap-network
+                - microservice-app-network
+        microservice-sap-rabbitmq-service:
+            //...
+            networks:
+                - microservice-sap-network
+                - microservice-app-network
+    networks:
+        //...
+        microservice-app-network:
+            driver: bridge
+            external: true
+
+### microservice-sap/.env
+###> php-amqplib/rabbitmq-bundle ###
+RABBITMQ_URL=amqp://guest:guest@microservice-sap-rabbitmq-container:5672
+RABBITMQ_URL_BR=amqp://guest:guest@microservice-br-rabbitmq-container:5672
+###< php-amqplib/rabbitmq-bundle ###
+
+### microservice-sap/config/packages/old_sound_rabbit_mq.yaml
+old_sound_rabbit_mq:
+    connections:
+        //...
+        br:
+            url: '%env(RABBITMQ_URL_BR)%'
+    consumers:
+        test_br:
+            connection: br
+            exchange_options: { name: 'testing-sap-exchange', type: direct }
+            queue_options: { name: 'testing-sap-queue' }
+            callback: App\RabbitMQ\Consumer\TestBrConsumer
+
+### microservice-sap/src/RabbitMQ/Consumer/TestBrConsumer.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\RabbitMQ\Consumer;
+
+use App\Entity\TestRabbitMq;
+use Doctrine\ORM\EntityManagerInterface;
+use OldSound\RabbitMqBundle\RabbitMq\ConsumerInterface;
+use PhpAmqpLib\Message\AMQPMessage;
+
+readonly class TestBrConsumer implements ConsumerInterface
+{
+    public function __construct(private EntityManagerInterface $entityManager)
+    {
+    }
+
+    public function execute(AMQPMessage $msg): void
+    {
+        $message = json_decode($msg->body, true);
+        if (null === $message || !array_key_exists('test-br', $message)) {
+            return;
+        }
+
+        $newTest = (new TestRabbitMq())->setName($message['test-br']);
+        $this->entityManager->persist($newTest);
+        $this->entityManager->flush();
+    }
+}
+
+
+
+
+HOW TO SEND DATA FROM microservice-br TO microservice-sap:
+in browser access http://localhost:8101/testing-rabbit-mq-sap
+[this will make microservice-br to publish a message in microservice-br-rabbitmq-container]
+
+docker exec -it microservice-sap-php-container bash
+php bin/console rabbitmq:consumer test_br
+
+DONE! WORKING !!!!
+
+==============================================================
+2. config rabbitmq config
+
+start RabbitMQ: source of inspiration: https://medium.com/q-software/symfony-and-rabbitmq-86b14dd604b1
+
+$ docker exec -it microservice-br-php-container bash
+$ composer require php-amqplib/rabbitmq-bundle
+ERROR:
+FIX: install missing extensions in docker: ext-pcntl, ext-sockets
+### docker/php/Dockerfile
+RUN apt-get update && apt-get install apt-file -y && apt-file update && apt-get install vim -y --no-install-recommends \
+        ...
+    && docker-php-ext-install \
+        ...
+        pcntl \
+        sockets
+
+OR IF THE docker-php-ext-install from above is not working then do this, as i did in microservice-sap project
+RUN docker-php-ext-install pcntl
+RUN docker-php-ext-install sockets
+
+$ docker compose -f docker/docker-compose.yaml up -d --build ### I USED THIS ONE INSTEAD OF NEXT ONE
+     $ docker compose -f docker/docker-compose.yaml build --no-cache
+
+     TEMPORARY FIX: composer require php-amqplib/rabbitmq-bundle --ignore-platform-req=ext-pcntl --ignore-platform-req=ext-sockets
+
+docker exec -it microservice-sap-php-container bash
+$ composer require php-amqplib/rabbitmq-bundle
+
+### config/packages/old_sound_rabbit_mq.yaml
+old_sound_rabbit_mq:
+    connections:
+        default:
+            url: '%env(RABBITMQ_URL)%'
+    producers:
+        test-producer:
+            connection: default
+            exchange_options: { name: 'testing-exchange', type: direct }
+            class: App\RabbitMQ\Producer\TestProducer
+    consumers:
+        test:
+            connection: default
+            exchange_options: { name: 'testing-exchange', type: direct }
+            queue_options: { name: 'testing-queue' }
+            callback: App\RabbitMQ\Consumer\TestConsumer
+            enable_logger: true
+
+### .env
+RABBITMQ_URL=amqp://guest:guest@microservice-sap-rabbit-container:5673  ### this is for sap! pay attention to ports defined in docker-compose.yaml file
+
+### docker exec -it microservice-sap-php-container bash
+php bin/console rabbitmq:setup-fabric
+
+### src/RabbitMQ\Producer\TestProducer.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\RabbitMQ\Producer;
+
+use OldSound\RabbitMqBundle\RabbitMq\Producer;
+
+class TestProducer extends Producer
+{
+}
+
+
+### src/RabbitMQ/Consumer/TestConsumer.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\RabbitMQ\Consumer;
+
+use App\Entity\Br;
+use Doctrine\ORM\EntityManagerInterface;
+use OldSound\RabbitMqBundle\RabbitMq\ConsumerInterface;
+use PhpAmqpLib\Message\AMQPMessage;
+use Psr\Log\LoggerInterface;
+
+readonly class TestConsumer implements ConsumerInterface
+{
+    public function __construct(
+        private EntityManagerInterface $entityManager,
+        private LoggerInterface $logger,
+    ) {
+    }
+
+    public function execute(AMQPMessage $msg): void
+    {
+        $message = json_decode($msg->body, true);
+        if (null === $message || !array_key_exists('br', $message)) {
+            $this->logger->error(__METHOD__.': error json_decoding AMQPMessage');
+
+            return;
+        }
+
+        $br = (new Br())->setName($message['br']);
+        $this->entityManager->persist($br);
+        $this->entityManager->flush();
+    }
+}
+
+
+### src/Controller/RabbitMQController.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Controller;
+
+use App\Service\TestRabbitService;
+use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
+use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\Routing\Annotation\Route;
+
+class RabbitMQController extends AbstractController
+{
+    #[Route('/testing-rabbit-mq', name: 'testing_rabbitmq_route', methods: 'GET')]
+    public function testingRabbitMq(TestRabbitService $testRabbitService): JsonResponse
+    {
+        $testRabbitService->testing();
+
+        return new JsonResponse(['sent' => 'ok4']);
+    }
+}
+
+
+### src/Service/TestRabbitService.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Service;
+
+use App\RabbitMQ\Producer\TestProducer;
+
+readonly class TestRabbitService
+{
+    public function __construct(private TestProducer $testProducer)
+    {
+    }
+
+    public function testing(): void
+    {
+        $message = json_encode(['br' => 'br-name3']);
+        $this->testProducer->publish($message);
+    }
+}
+
+### accessing http://localhost:8101/testing-rabbit-mq   THIS WILL SEND A MESSAGE FROM TestRabbitService::testing() ON Queue testing-queue
+### docker exec -it microservice-br-php-container bash
+php bin/console rabbitmq:consumer test  #test is from old_sound_rabbit_mq.yaml  THIS WILL CONSUME THE MESSAGE AND WILL EXECUTE TestConsumer CODE
+
+---
+
+https://www.rabbitmq.com/tutorials/tutorial-three-php.html
+
+There are a few exchange types available: direct, topic, headers and fanout.
+We'll focus on the last one -- the fanout.
+Let's create an exchange of this type, and call it logs:
+
+The fanout exchange is very simple. As you can probably guess from the name, it just broadcasts all the messages it
+receives to all the queues it knows. And that's exactly what we need for our logger.
+
+
+OBS
+docker exec -it microservice-br-rabbitmq-container bash
+cc2d4af3cca3:/# rabbitmqctl list_exchanges
+Listing exchanges for vhost / ...
+name    type
+amq.rabbitmq.trace      topic
+        direct
+amq.match       headers
+amq.topic       topic
+amq.headers     headers
+amq.fanout      fanout
+amq.direct      direct
+
+---
+
+
+
+docker exec -it microservice-br-rabbitmq-container bash
+cc2d4af3cca3:/# rabbitmqctl   ===== this will list all available commands
+rabbitmqctl add_user           Creates a new user in the internal database. This user will have no permissions for any virtual hosts by default.
+rabbitmqctl change_password    Changes the user password
+rabbitmqctl delete_user        Removes a user from the internal database. Has no effect on users provided by external backends such as LDAP
+rabbitmqctl list_users         List user names and tags
+rabbitmqctl clear_permissions  Revokes user permissions for a vhost
+rabbitmqctl list_permissions   Lists user permissions in a virtual host
+rabbitmqctl list_user_permissions    Lists permissions of a user across all virtual hosts
+rabbitmqctl list_vhosts        Lists virtual hosts
+rabbitmqctl set_permissions    Sets user permissions for a vhost
+rabbitmqctl list_bindings                          Lists all bindings on a vhost
+rabbitmqctl list_channels                          Lists all channels in the node
+rabbitmqctl list_connections                       Lists AMQP 0.9.1 connections for the node
+rabbitmqctl list_consumers                         Lists all consumers for a vhost
+rabbitmqctl list_exchanges                         Lists exchanges
+rabbitmqctl list_queues                            Lists queues and their properties
+rabbitmqctl list_policies                          Lists all policies in a virtual host
+rabbitmqctl add_vhost                              Creates a virtual host
+rabbitmqctl delete_vhost                           Deletes a virtual host
+rabbitmqctl restart_vhost                          Restarts a failed vhost data stores and queues
+rabbitmqctl delete_queue                           Deletes a queue
+rabbitmqctl purge_queue                            Purges a queue (removes all messages in it)
+rabbitmqctl hash_password                          Hashes a plaintext password
+
+
+==============================================================
+
+3. config redis config
+
+
+OBS redis documentation: https://github.com/phpredis/phpredis
+redis installation example:
+use it with docker:
+
+version: '3'
+services:
+  redis-service:
+    image: library/redis:alpine
+    container_name: redis5-container
+    tty: true
+
+
+OBS check installation
+$ docker logs redis5-container
+
+1:C 09 Jul 2023 18:13:25.166 # oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo
+
+1:C 09 Jul 2023 18:13:25.167 # Redis version=6.2.12, bits=64, commit=00000000, modified=0, pid=1, just started
+
+1:C 09 Jul 2023 18:13:25.167 # Warning: no config file specified, using the default config. In order to specify a config file use redis-server /path/to/redis.conf
+
+1:M 09 Jul 2023 18:13:25.167 * monotonic clock: POSIX clock_gettime
+
+                _._
+
+           _.-``__ ''-._
+
+      _.-``    `.  `_.  ''-._           Redis 6.2.12 (00000000/0) 64 bit
+
+  .-`` .-```.  ```\/    _.,_ ''-._
+
+ (    '      ,       .-`  | `,    )     Running in standalone mode
+
+|`-._`-...-` __...-.``-._|'` _.-'|     Port: 6379
+
+|    `-._   `._    /     _.-'    |     PID: 1
+
+  `-._    `-._  `-./  _.-'    _.-'
+
+ |`-._`-._    `-.__.-'    _.-'_.-'|
+
+ |    `-._`-._        _.-'_.-'    |           https://redis.io
+
+  `-._    `-._`-.__.-'_.-'    _.-'
+
+ |`-._`-._    `-.__.-'    _.-'_.-'|
+
+ |    `-._`-._        _.-'_.-'    |
+
+  `-._    `-._`-.__.-'_.-'    _.-'
+
+      `-._    `-.__.-'    _.-'
+
+          `-._        _.-'
+
+              `-.__.-'
+
+
+
+1:M 09 Jul 2023 18:13:25.168 # WARNING: The TCP backlog setting of 511 cannot be enforced because /proc/sys/net/core/somaxconn is set to the lower value of 128.
+
+1:M 09 Jul 2023 18:13:25.168 # Server initialized
+
+1:M 09 Jul 2023 18:13:25.168 # WARNING Memory overcommit must be enabled! Without it, a background save or replication may fail under low memory condition. Being disabled, it can can also cause failures without low memory condition, see https://github.com/jemalloc/jemalloc/issues/1328. To fix this issue add 'vm.overcommit_memory = 1' to /etc/sysctl.conf and then reboot or run the command 'sysctl vm.overcommit_memory=1' for this to take effect.
+
+1:M 09 Jul 2023 18:13:25.168 * Ready to accept connections
+
+OBS check ping-pong inside container
+$ docker exec -it redis5-container bash
+root@d2b347147571:/data# redis-cli
+127.0.0.1:6379> ping
+PONG
+
+OBS redis clear-cache
+$ docker exec -it redis5-container redis-cli FLUSHALL
+OK
+
+OBS non-docker redis clear-cache [redis clear cache, redis cache clear]
+redis-cli FLUSHALL
+OK
+
+use it with symfony and docker: (this code is copied from bmm-sap-app)   [https://symfony.com/doc/current/components/cache/adapters/redis_adapter.html]
+
+### install predis using composer - MANDATORY STEP!
+$ php composer.phar require predis/predis
+
+### .env.local - MANDATORY STEP!
+REDIS_URL=redis://redis5-container:6379
+
+### config/packages/cache.yaml - MANDATORY STEP!
+framework:
+  cache:
+    pools:
+      redis.cache:
+        adapter: cache.adapter.redis
+        provider: '%env(REDIS_URL)%'
+        default_lifetime: 86400
+        tags: true
+
+TESTING REDIS:
+### src/Controller/TestingController.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Controller;
+
+use App\Service\RedisService;
+use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\Routing\Annotation\Route;
+
+class TestingController extends AbstractController
+{
+    #[Route('/testing-save-in-redis', name: 'testing_save_in_redis_route', methods: 'GET')]
+    public function testingSaveInRedis(RedisService $redisService): Response
+    {
+        $redisService->save('redis1', 101, RedisService::ONE_MINUTE_IN_SECONDS);
+
+        return new Response('
+            <html>
+                <head>
+                    <title>this is the title for save</title>
+                </head>
+                <body>
+                    this is the body for save in redis
+                </body>
+            </html>
+        ');
+    }
+
+    #[Route('/testing-read-in-redis', name: 'testing_read_in_redis_route', methods: 'GET')]
+    public function testingReadInRedis(RedisService $redisService): Response
+    {
+        $value = $redisService->read('redis1');
+        if (null !== $value) {
+            $value = $value->get();
+        } else {
+            $value = 'N/A. Redis expired!';
+        }
+
+        return new Response('
+            <html>
+                <head>
+                    <title>this is the title for read</title>
+                </head>
+                <body>
+                    this is the body for read in redis <br>
+                    '.$value.'
+                </body>
+            </html>
+        ');
+    }
+}
+
+
+### src/Service/RedisService.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Service;
+
+use Psr\Cache\CacheItemInterface;
+use Psr\Cache\CacheItemPoolInterface;
+use Psr\Log\LoggerInterface;
+use Symfony\Component\Cache\CacheItem;
+
+class RedisService
+{
+    public const ONE_MINUTE_IN_SECONDS = 60;
+    public const ONE_HOUR_IN_SECONDS = 3600;
+    public const ONE_DAY_IN_SECONDS = 86400;
+
+    public function __construct(
+        private readonly CacheItemPoolInterface $redisCache,
+        private readonly LoggerInterface $logger
+    ) {
+    }
+
+    public function save(string $key, $value, int $lifetime = self::ONE_HOUR_IN_SECONDS): bool
+    {
+        try {
+            /** @var CacheItem $cacheItem */
+            $cacheItem = $this->redisCache->getItem($key);
+        } catch (\Exception $exception) {
+            $this->logger->error(__METHOD__.': '.$exception->getMessage());
+
+            return false;
+        }
+
+        $cacheItem->set($value);
+        $cacheItem->expiresAfter($lifetime);
+        $this->logger->info(__METHOD__.': saved in key = '.$key.', value = '.print_r($value, true).', with lifetime = '.$lifetime);
+
+        return $this->redisCache->save($cacheItem);
+    }
+
+    public function read(string $key): ?CacheItemInterface
+    {
+        try {
+            /** @var CacheItem $cacheItem */
+            $cacheItem = $this->redisCache->getItem($key);
+        } catch (\Exception $exception) {
+            $this->logger->error(__METHOD__.': '.$exception->getMessage());
+
+            return null;
+        }
+
+        if ($cacheItem->isHit()) {
+            $this->logger->info(
+                __METHOD__.': success to read from redis. key = '.$key.', value = '.print_r($cacheItem->get(), true)
+            );
+        }
+
+        if (!$cacheItem->isHit()) {
+            $this->logger->warning(
+                __METHOD__.': failed to read from redis. key = '.$key.', value = '.print_r($cacheItem->get(), true)
+            );
+        }
+
+        return $cacheItem->isHit() ? $cacheItem : null;
+    }
+
+    public function delete(string $key): bool
+    {
+        try {
+            return $this->redisCache->deleteItem($key);
+        } catch (\Exception $exception) {
+            $this->logger->error(__METHOD__.': '.$exception->getMessage());
+
+            return false;
+        }
+    }
+}
+
+==============================================================
