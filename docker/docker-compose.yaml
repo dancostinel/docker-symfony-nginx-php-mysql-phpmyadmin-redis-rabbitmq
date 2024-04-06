@@ -12,6 +12,7 @@ services:
         ports: ['8551:80']
         networks:
             - sf64-1-network
+#            - sf64-1-app-network
     sf64-1-php-service:
         build:
             context: .
@@ -23,7 +24,7 @@ services:
             - ./../vendor:/var/www/sf64-1/vendor
         networks:
             - sf64-1-network
-            - sf64-1-app-network
+#            - sf64-1-app-network
     sf64-1-mysql-service:
         image: mysql
         container_name: sf64-1-mysql-container
@@ -60,14 +61,14 @@ services:
         container_name: sf64-1-rabbitmq-container
         ports: [ '5672:5672', '15672:15672' ]
         volumes:
-            - ./docker-conf/rabbitmq/data/:/var/lib/rabbitmq/
+            - ./docker-conf/rabbitmq/data/:/var/lib/rabbitmq/mnesia
             - ./docker-conf/rabbitmq/log/:/var/log/rabbitmq
         networks:
             - sf64-1-network
-            - sf64-1-app-network
+#            - sf64-1-app-network
 networks:
     sf64-1-network:
         driver: bridge
-    sf64-1-app-network:
-        driver: bridge
-        external: true
+#    sf64-1-app-network:
+#        driver: bridge
+#        external: true

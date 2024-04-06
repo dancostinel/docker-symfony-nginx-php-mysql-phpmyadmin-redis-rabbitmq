@@ -13,7 +13,9 @@ RUN apt-get update && apt-get install apt-file -y && apt-file update && apt-get 
         ctype \
         iconv \
         session \
-        simplexml
+        simplexml \
+        pcntl \
+        sockets
 
 RUN curl -sS https://getcomposer.org/installer | php && mv composer.phar /usr/local/bin/composer
 WORKDIR /var/www/sf64-1/

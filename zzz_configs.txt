@@ -25,6 +25,7 @@ services:
         ports: ['8101:80']
         networks:
             - microservice-br-network
+#            - microservice-app-network
     microservice-br-php-service:
         build:
             context: .
@@ -36,11 +37,11 @@ services:
             - ./../vendor:/var/www/microservice-br/vendor
         networks:
             - microservice-br-network
-            - microservice-app-network
+#            - microservice-app-network
     microservice-br-mysql-service:
         image: mysql
         container_name: microservice-br-mysql-container
-        command: ['--character-set-server=utf8mb4', '--collation-server=utf8mb4_unicode_ci', '--authentication_policy=mysql_native_password']
+        command: ['--character-set-server=utf8mb4', '--collation-server=utf8mb4_unicode_ci', '--authentication_policy=caching_sha2_password']
         environment:
             MYSQL_ROOT_PASSWORD: root
         ports: ['3101:3306']
@@ -73,17 +74,17 @@ services:
         container_name: microservice-br-rabbitmq-container
         ports: [ '5672:5672', '15672:15672' ]
         volumes:
-            - ./docker-conf/rabbitmq/data/:/var/lib/rabbitmq/
+            - ./docker-conf/rabbitmq/data/:/var/lib/rabbitmq/mnesia
             - ./docker-conf/rabbitmq/log/:/var/log/rabbitmq
         networks:
             - microservice-br-network
-            - microservice-app-network
+#            - microservice-app-network
 networks:
     microservice-br-network:
         driver: bridge
-    microservice-app-network:
-        driver: bridge
-        external: true
+#    microservice-app-network:    # after creating the containers, run: $ docker network create -d bridge microservice-app-network
+#        driver: bridge
+#        external: true
 
 
 $ vi docker/nginx/default.conf
@@ -116,17 +117,24 @@ server {
 
 
 $ vi docker/php/Dockerfile
-FROM php:8.2.0-fpm
+FROM php:8.3.0-fpm
 RUN apt-get update && apt-get install apt-file -y && apt-file update && apt-get install vim -y --no-install-recommends \
         git \
         zlib1g-dev \
         libxml2-dev \
         libzip-dev \
+        unzip \
     && docker-php-ext-install \
         zip \
         intl \
         mysqli \
-        pdo pdo_mysql
+        pdo pdo_mysql \
+        ctype \
+        iconv \
+        session \
+        simplexml \
+        pcntl \
+        sockets
 
 RUN curl -sS https://getcomposer.org/installer | php && mv composer.phar /usr/local/bin/composer
 WORKDIR /var/www/microservice-br/
@@ -145,6 +153,7 @@ $ git add .
 $ git commit -m "init"
 $ git push origin master
 $ docker compose -f docker/docker-compose.yaml up -d
+$ docker compose -f docker/docker-compose.yaml up -d --build
 $ docker compose -f docker/docker-compose.yaml up -d --build --force-recreate
 IF I WANT TO SEE LOGS: docker compose -f docker/docker-compose.yaml up --build --force-recreate
 
@@ -166,8 +175,9 @@ git branch: monolog
 ### microservice-br/config/packages/monolog.yaml
 monolog:
     channels:
-        - rabbit_br   #LoggerInterface $rabbitBrLogger
-        - rabbit_sap  #LoggerInterface $rabbitSapLogger
+        - rabbit_br   #usage: LoggerInterface $rabbitBrLogger
+        - rabbit_sap  #usage: LoggerInterface $rabbitSapLogger
+        - api         #usage: LoggerInterface $apiLogger
 
 when@dev:
     monolog:
@@ -184,6 +194,11 @@ when@dev:
                 level: debug
                 channels: ["rabbit_sap"]
                 formatter: 'monolog.formatter.json'
+            api:
+                type: stream
+                path: '%kernel.logs_dir%/api.log'
+                level: debug
+                channels: ["api"]
 
 ### src/Service/TestRabbitSapService.php
 <?php
@@ -199,7 +214,8 @@ readonly class TestRabbitSapService
 {
     public function __construct(
         private LoggerInterface $rabbitBrLogger,
-        private TestSapProducer $testSapProducer
+        private TestSapProducer $testSapProducer,
+        private LoggerInterface $apiLogger,
     ) {
     }
 
@@ -208,6 +224,7 @@ readonly class TestRabbitSapService
         $message = json_encode(['test-br' => 'br-for-sap2']);
         $this->testSapProducer->publish($message);
         $this->rabbitBrLogger->notice('A new RabbitMQ SAP message was published '.$message);
+        $this->apiLogger->info(__METHOD__);
     }
 }
 
@@ -246,6 +263,9 @@ php bin/console rabbitmq:consumer test
 OBS a new file is created in var/log/ with rabbit_br.log name WHICH WILL STORE LOGS LIKE THIS:
 {"message":"A new RabbitMQ BR message was published {\"br\":\"br-name44\"}","context":{},"level":250,"level_name":"NOTICE","channel":"rabbit_br","datetime":"2023-12-19T21:02:35.906514+02:00","extra":{}}
 
+OBS a new file is created var/log/api.log
+[2024-04-06T15:07:03.756820+00:00] api.INFO: App\Service\TestRabbitSapService::testing [] []
+
 MONOLOG CREATE NEW LOG FILE END
 
 ==============================================================
@@ -256,25 +276,23 @@ https://stackoverflow.com/questions/12822403/symfony2-and-rabbitmqbundle-cant-pu
 https://medium.com/q-software/symfony-and-rabbitmq-86b14dd604b1
 
 OBS i want to connect microservice-br-rabbitmq-container with microservice-sap-rabbitmq-container
+
+
 STEP1 i MUST create the common network by typing:
 $ docker network create -d bridge microservice-app-network
 $ docker network ls
 IF THIS COMMON NETWORK IS NOT CREATED LIKE SO, AN ERROR WILL BE THROWN WHEN TRYING TO up -d ONE OF THE CONTAINERS FROM EITHER APP
 network microservice-app-network declared as external, but could not be found
+
+
 STEP2
-cd microservice-br/
-docker compose -f docker/docker-compose.yaml up -d
-
-cd microservice-sap/
-docker compose -f docker/docker-compose.yaml up -d
-
-
-
-
-STEP3
 ### microservice-br/docker/docker-compose.yaml
 services:
-    //...
+    microservice-br-nginx-service:
+        //...
+        networks:
+            - microservice-br-network
+            - microservice-app-network
     microservice-br-php-service:
         //...
         networks:
@@ -290,6 +308,38 @@ networks:
     microservice-app-network:
         driver: bridge
         external: true
+
+
+### microservice-sap/docker/docker-compose.yaml
+    services:
+        microservice-sap-nginx-service:
+            //...
+            networks:
+                - microservice-sap-network
+                - microservice-app-network
+        microservice-sap-php-service:
+            //...
+            networks:
+                - microservice-sap-network
+                - microservice-app-network
+        microservice-sap-rabbitmq-service:
+            //...
+            networks:
+                - microservice-sap-network
+                - microservice-app-network
+    networks:
+        //...
+        microservice-app-network:
+            driver: bridge
+            external: true
+
+cd microservice-br/
+docker compose -f docker/docker-compose.yaml up -d --build
+
+cd microservice-sap/
+docker compose -f docker/docker-compose.yaml up -d --build
+
+
 
 ### microservice-br/config/packages/old_sound_rabbit_mq.yaml
 old_sound_rabbit_mq:
@@ -357,25 +407,6 @@ $ php bin/console make:migration
 
 $ php bin/console doctrine:migrations:migrate
 
-### microservice-sap/docker/docker-compose.yaml
-    services:
-        //...
-        microservice-sap-php-service:
-            //...
-            networks:
-                - microservice-sap-network
-                - microservice-app-network
-        microservice-sap-rabbitmq-service:
-            //...
-            networks:
-                - microservice-sap-network
-                - microservice-app-network
-    networks:
-        //...
-        microservice-app-network:
-            driver: bridge
-            external: true
-
 ### microservice-sap/.env
 ###> php-amqplib/rabbitmq-bundle ###
 RABBITMQ_URL=amqp://guest:guest@microservice-sap-rabbitmq-container:5672
@@ -392,7 +423,7 @@ old_sound_rabbit_mq:
         test_br:
             connection: br
             exchange_options: { name: 'testing-sap-exchange', type: direct }
-            queue_options: { name: 'testing-sap-queue' }
+            queue_options: { name: 'testing-sap-queue' }   ### THIS IS IMPORTANT !
             callback: App\RabbitMQ\Consumer\TestBrConsumer
 
 ### microservice-sap/src/RabbitMQ/Consumer/TestBrConsumer.php
@@ -488,6 +519,7 @@ old_sound_rabbit_mq:
 ### .env
 RABBITMQ_URL=amqp://guest:guest@microservice-sap-rabbit-container:5673  ### this is for sap! pay attention to ports defined in docker-compose.yaml file
 
+### NOT REALLY NEEDED. CAN BE SKIPPED
 ### docker exec -it microservice-sap-php-container bash
 php bin/console rabbitmq:setup-fabric
 
