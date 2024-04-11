@@ -752,7 +752,7 @@ $ docker logs redis5-container
 1:M 09 Jul 2023 18:13:25.168 * Ready to accept connections
 
 OBS check ping-pong inside container
-$ docker exec -it redis5-container bash
+$ docker exec -it redis5-container bash        OR       docker exec -it redis5-container redis-cli
 root@d2b347147571:/data# redis-cli
 127.0.0.1:6379> ping
 PONG
