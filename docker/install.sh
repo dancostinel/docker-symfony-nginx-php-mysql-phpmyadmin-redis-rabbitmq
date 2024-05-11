@@ -1,4 +1,4 @@
 #!/bin/bash
 
-docker exec zzz-php-container composer ins
-docker exec zzz-php-container php bin/console doctrine:database:create
+docker exec sf64-1-php-container composer ins
+docker exec sf64-1-php-container php bin/console doctrine:database:create
