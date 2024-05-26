@@ -25,4 +25,6 @@
 ###< symfony/asset-mapper ###
 
 docker/mysql/
-docker/docker-conf/
+docker/docker-conf/rabbitmq/data
+docker/docker-conf/rabbitmq/log
+
