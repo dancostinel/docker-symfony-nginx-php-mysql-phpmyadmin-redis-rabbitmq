@@ -57,7 +57,9 @@ services:
         networks:
             - sf64-1-network
     sf64-1-rabbitmq-service:
-        image: rabbitmq:3-management-alpine
+        build:
+            context: .
+            dockerfile: ./docker-conf/rabbitmq/www/Dockerfile
         container_name: sf64-1-rabbitmq-container
         ports: [ '5670:5672', '15670:15672' ]
         volumes:

@@ -1,4 +1,10 @@
 ==============================================================
+display used ports:
+
+sudo lsof -i -P -n | grep LISTEN
+sudo netstat -tulpn | grep LISTEN
+sudo ss -tulpn | grep LISTEN
+==============================================================
 
 0. config docker project config
 
@@ -471,6 +477,38 @@ DONE! WORKING !!!!
 
 ==============================================================
 2. config rabbitmq config
+
+### app/docker/docker-composer.yaml
+version: '3'
+services:
+    #...
+    sf64-1-rabbitmq-service:
+        build:
+            context: .
+            dockerfile: ./docker-conf/rabbitmq/www/Dockerfile
+        container_name: sf64-1-rabbitmq-container
+        ports: [ '5670:5672', '15670:15672' ]
+        volumes:
+            - ./docker-conf/rabbitmq/data/:/var/lib/rabbitmq/mnesia
+            - ./docker-conf/rabbitmq/log/:/var/log/rabbitmq
+        networks:
+            - sf64-1-network
+
+### app/docker/docker-conf/rabbitmq/www/Dockerfile
+FROM rabbitmq:3-management-alpine
+COPY docker-conf/rabbitmq/www/rabbitmq.conf /etc/rabbitmq
+
+### app/docker/docker-conf/rabbitmq/www/rabbitmq.conf
+default_user = theuser
+default_pass = thepass
+default_vhost = app_vhost
+
+
+
+
+
+
+
 
 start RabbitMQ: source of inspiration: https://medium.com/q-software/symfony-and-rabbitmq-86b14dd604b1
 
