@@ -25,6 +25,13 @@ services:
         networks:
             - sf64-1-network
 #            - sf64-1-app-network
+        depends_on:
+            sf64-1-mysql-service:
+                condition: service_healthy
+            sf64-1-redis-service:
+                condition: service_healthy
+            sf64-1-rabbitmq-service:
+                condition: service_healthy
     sf64-1-mysql-service:
         image: mysql
         container_name: sf64-1-mysql-container
@@ -34,6 +41,11 @@ services:
         ports: ['3556:3306']
         volumes:
             - ./mysql:/var/lib/mysql
+        healthcheck:
+            test: "/usr/bin/mysql --user=root --password=root --execute \"SHOW DATABASES;\""
+            interval: 4s
+            timeout: 20s
+            retries: 15
         networks:
             - sf64-1-network
     sf64-1-phpmyadmin-service:
@@ -53,6 +65,11 @@ services:
     sf64-1-redis-service:
         image: library/redis:alpine
         container_name: sf64-1-redis-container
+        healthcheck:
+            test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+            interval: 5s
+            timeout: 30s
+            retries: 15
         tty: true
         networks:
             - sf64-1-network
@@ -65,6 +82,11 @@ services:
         volumes:
             - ./docker-conf/rabbitmq/data/:/var/lib/rabbitmq/mnesia
             - ./docker-conf/rabbitmq/log/:/var/log/rabbitmq
+        healthcheck:
+            test: rabbitmq-diagnostics check_port_connectivity
+            interval: 4s
+            timeout: 20s
+            retries: 15
         networks:
             - sf64-1-network
 #            - sf64-1-app-network
