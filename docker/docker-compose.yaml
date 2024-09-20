@@ -2,39 +2,39 @@ version: '3'
 volumes:
     mysql_data:
 services:
-    sf64-1-nginx-service:
+    symfony1-nginx-service:
         build:
             context: .
             dockerfile: ./nginx/Dockerfile
-        container_name: sf64-1-nginx-container
+        container_name: symfony1-nginx-container
         volumes:
-            - ./../:/var/www/sf64-1/
+            - ./../:/var/www/symfony1/
         ports: ['8551:80']
         networks:
-            - sf64-1-network
-#            - sf64-1-app-network
-    sf64-1-php-service:
+            - symfony1-network
+#            - symfony1-app-network
+    symfony1-php-service:
         build:
             context: .
             dockerfile: ./php/Dockerfile
-        container_name: sf64-1-php-container
+        container_name: symfony1-php-container
         ports: ['9551:9000']
         volumes:
-            - ./../:/var/www/sf64-1/
-            - ./../vendor:/var/www/sf64-1/vendor
+            - ./../:/var/www/symfony1/
+            - ./../vendor:/var/www/symfony1/vendor
         networks:
-            - sf64-1-network
-#            - sf64-1-app-network
+            - symfony1-network
+#            - symfony1-app-network
         depends_on:
-            sf64-1-mysql-service:
+            symfony1-mysql-service:
                 condition: service_healthy
-            sf64-1-redis-service:
+            symfony1-redis-service:
                 condition: service_healthy
-            sf64-1-rabbitmq-service:
+            symfony1-rabbitmq-service:
                 condition: service_healthy
-    sf64-1-mysql-service:
+    symfony1-mysql-service:
         image: mysql
-        container_name: sf64-1-mysql-container
+        container_name: symfony1-mysql-container
         command: ['--character-set-server=utf8mb4', '--collation-server=utf8mb4_unicode_ci', '--authentication_policy=caching_sha2_password']
         environment:
             MYSQL_ROOT_PASSWORD: root
@@ -47,24 +47,24 @@ services:
             timeout: 20s
             retries: 15
         networks:
-            - sf64-1-network
-    sf64-1-phpmyadmin-service:
+            - symfony1-network
+    symfony1-phpmyadmin-service:
         image: phpmyadmin/phpmyadmin:latest
-        container_name: sf64-1-phpmyadmin-container
+        container_name: symfony1-phpmyadmin-container
         environment:
-            PMA_HOST: sf64-1-mysql-service
+            PMA_HOST: symfony1-mysql-service
             PMA_USER: root
             PMA_PASSWORD: root
         ports: ['8552:80']
         depends_on:
-            - sf64-1-mysql-service
+            - symfony1-mysql-service
         volumes:
-            - ./phpmyadmin/:/var/www/sf64-1/docker/phpmyadmin/
+            - ./phpmyadmin/:/var/www/symfony1/docker/phpmyadmin/
         networks:
-            - sf64-1-network
-    sf64-1-redis-service:
+            - symfony1-network
+    symfony1-redis-service:
         image: library/redis:alpine
-        container_name: sf64-1-redis-container
+        container_name: symfony1-redis-container
         healthcheck:
             test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
             interval: 5s
@@ -72,12 +72,12 @@ services:
             retries: 15
         tty: true
         networks:
-            - sf64-1-network
-    sf64-1-rabbitmq-service:
+            - symfony1-network
+    symfony1-rabbitmq-service:
         build:
             context: .
             dockerfile: ./docker-conf/rabbitmq/www/Dockerfile
-        container_name: sf64-1-rabbitmq-container
+        container_name: symfony1-rabbitmq-container
         ports: [ '5670:5672', '15670:15672' ]
         volumes:
             - ./docker-conf/rabbitmq/data/:/var/lib/rabbitmq/mnesia
@@ -88,11 +88,11 @@ services:
             timeout: 20s
             retries: 15
         networks:
-            - sf64-1-network
-#            - sf64-1-app-network
+            - symfony1-network
+#            - symfony1-app-network
 networks:
-    sf64-1-network:
+    symfony1-network:
         driver: bridge
-#    sf64-1-app-network:
+#    symfony1-app-network:
 #        driver: bridge
 #        external: true
