@@ -5,6 +5,14 @@ sudo lsof -i -P -n | grep LISTEN
 sudo netstat -tulpn | grep LISTEN
 sudo ss -tulpn | grep LISTEN
 ==============================================================
+UPGRADE SYMFONY VERSION
+$ docker exec -it symfony1-php-container bash
+# vi composer.json
+  replace 6.4 with 7.1
+# composer update "symfony/*" -W
+# exit   ---- exit symfony1-php-container
+$ rm -rf var/cache/*
+==============================================================
 
 0. config docker project config
 
