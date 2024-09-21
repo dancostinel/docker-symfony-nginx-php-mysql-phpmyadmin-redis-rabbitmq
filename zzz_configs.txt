@@ -967,3 +967,20 @@ class RedisService
 }
 
 ==============================================================
+
+4. config doctrine test database (for functional tests)
+
+### config/packages/doctrine.yaml
+when@test:
+    doctrine:
+        dbal:
+            url: '%env(resolve:DATABASE_TEST_URL)%'
+
+### .env.test
+DATABASE_TEST_URL="mysql://root:root@symfony1-mysql-container:3306/symfony1-db"
+
+$ docker exec -it symfony1-php-container bash
+# php bin/console doctrine:database:create -e test
+Created database `symfony1-db_test` for connection named default
+
+==============================================================
