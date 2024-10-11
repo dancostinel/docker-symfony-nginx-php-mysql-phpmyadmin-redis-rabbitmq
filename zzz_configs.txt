@@ -988,3 +988,16 @@ $ docker exec -it symfony1-php-container bash
 # php bin/console doctrine:migrations:migrate -e test
 
 ==============================================================
+
+1)
+composer require league/oauth2-server-bundle
+
+2)
+$ mkdir config/oauth
+$ docker exec -it symfony1-php-container bash
+# openssl genrsa -out config/oauth/private.key 2048
+# openssl rsa -in config/oauth/private.key -pubout -out config/oauth/public.key
+$ chmod 600 config/oauth/private.key
+
+3)
+### src/Service/OAuth2Service.php

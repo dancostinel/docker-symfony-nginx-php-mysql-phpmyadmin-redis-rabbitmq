@@ -28,3 +28,7 @@ docker/mysql/
 docker/docker-conf/rabbitmq/data
 docker/docker-conf/rabbitmq/log
 
+
+###> league/oauth2-server-bundle ###
+/config/jwt/*.pem
+###< league/oauth2-server-bundle ###
