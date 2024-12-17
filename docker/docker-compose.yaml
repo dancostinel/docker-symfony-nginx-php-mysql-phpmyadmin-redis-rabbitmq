@@ -2,43 +2,43 @@ version: '3'
 volumes:
     mysql_data:
 services:
-    symfony1-nginx-service:
+    gigi-nginx-service:
         build:
             context: .
             dockerfile: ./nginx/Dockerfile
-        container_name: symfony1-nginx-container
+        container_name: gigi-nginx-container
         volumes:
-            - ./../:/var/www/symfony1/
-        ports: ['8551:80']
+            - ./../:/var/www/gigi/
+        ports: ['18001:80']
         networks:
-            - symfony1-network
-#            - symfony1-app-network
-    symfony1-php-service:
+            - gigi-network
+#            - gigi-app-network
+    gigi-php-service:
         build:
             context: .
             dockerfile: ./php/Dockerfile
-        container_name: symfony1-php-container
-        ports: ['9551:9000']
+        container_name: gigi-php-container
+        ports: ['19001:9000']
         volumes:
-            - ./../:/var/www/symfony1/
-            - ./../vendor:/var/www/symfony1/vendor
+            - ./../:/var/www/gigi/
+            - ./../vendor:/var/www/gigi/vendor
         networks:
-            - symfony1-network
-#            - symfony1-app-network
+            - gigi-network
+#            - gigi-app-network
         depends_on:
-            symfony1-mysql-service:
+            gigi-mysql-service:
                 condition: service_healthy
-            symfony1-redis-service:
+            gigi-redis-service:
                 condition: service_healthy
-            symfony1-rabbitmq-service:
+            gigi-rabbitmq-service:
                 condition: service_healthy
-    symfony1-mysql-service:
+    gigi-mysql-service:
         image: mysql
-        container_name: symfony1-mysql-container
+        container_name: gigi-mysql-container
         command: ['--character-set-server=utf8mb4', '--collation-server=utf8mb4_unicode_ci', '--authentication_policy=caching_sha2_password']
         environment:
             MYSQL_ROOT_PASSWORD: root
-        ports: ['3556:3306']
+        ports: ['13307:3306']
         volumes:
             - ./mysql:/var/lib/mysql
         healthcheck:
@@ -47,24 +47,24 @@ services:
             timeout: 20s
             retries: 15
         networks:
-            - symfony1-network
-    symfony1-phpmyadmin-service:
+            - gigi-network
+    gigi-phpmyadmin-service:
         image: phpmyadmin/phpmyadmin:latest
-        container_name: symfony1-phpmyadmin-container
+        container_name: gigi-phpmyadmin-container
         environment:
-            PMA_HOST: symfony1-mysql-service
+            PMA_HOST: gigi-mysql-service
             PMA_USER: root
             PMA_PASSWORD: root
-        ports: ['8552:80']
+        ports: ['18002:80']
         depends_on:
-            - symfony1-mysql-service
+            - gigi-mysql-service
         volumes:
-            - ./phpmyadmin/:/var/www/symfony1/docker/phpmyadmin/
+            - ./phpmyadmin/:/var/www/gigi/docker/phpmyadmin/
         networks:
-            - symfony1-network
-    symfony1-redis-service:
+            - gigi-network
+    gigi-redis-service:
         image: library/redis:alpine
-        container_name: symfony1-redis-container
+        container_name: gigi-redis-container
         healthcheck:
             test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
             interval: 5s
@@ -72,13 +72,13 @@ services:
             retries: 15
         tty: true
         networks:
-            - symfony1-network
-    symfony1-rabbitmq-service:
+            - gigi-network
+    gigi-rabbitmq-service:
         build:
             context: .
             dockerfile: ./docker-conf/rabbitmq/www/Dockerfile
-        container_name: symfony1-rabbitmq-container
-        ports: [ '5670:5672', '15670:15672' ]
+        container_name: gigi-rabbitmq-container
+        ports: [ '15002:5672', '15003:15672' ]
         volumes:
             - ./docker-conf/rabbitmq/data/:/var/lib/rabbitmq/mnesia
             - ./docker-conf/rabbitmq/log/:/var/log/rabbitmq
@@ -88,11 +88,11 @@ services:
             timeout: 20s
             retries: 15
         networks:
-            - symfony1-network
-#            - symfony1-app-network
+            - gigi-network
+#            - gigi-app-network
 networks:
-    symfony1-network:
+    gigi-network:
         driver: bridge
-#    symfony1-app-network:
+#    gigi-app-network:
 #        driver: bridge
 #        external: true
