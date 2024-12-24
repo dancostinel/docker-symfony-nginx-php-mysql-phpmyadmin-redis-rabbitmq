@@ -25,4 +25,4 @@ RUN apt-get install -y librabbitmq-dev libssl-dev
 RUN pecl install amqp && docker-php-ext-enable amqp
 
 RUN curl -sS https://getcomposer.org/installer | php && mv composer.phar /usr/local/bin/composer
-WORKDIR /var/www/gigi/
+WORKDIR /var/www/symfony1/
