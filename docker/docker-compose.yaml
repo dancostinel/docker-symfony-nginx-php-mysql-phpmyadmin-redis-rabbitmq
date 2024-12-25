@@ -32,6 +32,8 @@ services:
                 condition: service_healthy
             symfony1-rabbitmq-service:
                 condition: service_healthy
+        extra_hosts:
+            - 'host.docker.internal:host-gateway'
     symfony1-mysql-service:
         image: mysql
         container_name: symfony1-mysql-container
