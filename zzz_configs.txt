@@ -988,3 +988,3738 @@ $ docker exec -it symfony1-php-container bash
 # php bin/console doctrine:migrations:migrate -e test
 
 ==============================================================
+
+
+========================================================================================================================
+========================================================================================================================
+24. change default timezone
+
+### .env
+APP_TIMEZONE=Europe/Bucharest
+
+### config/services.yaml
+parameters:
+    timezone: '%env(APP_TIMEZONE)%'
+
+### src/Kernel.php
+class Kernel extends BaseKernel
+{
+    //...
+    public function boot(): void
+    {
+        parent::boot();
+        date_default_timezone_set($this->getContainer()->getParameter('timezone'));
+    }
+}
+
+OBS to apply changes:
+$ sudo docker compose -f docker/docker-compose.yaml down
+$ sudo docker compose -f docker/docker-compose.yaml up -d --build
+
+========================================================================================================================
+========================================================================================================================
+23. Upgrade Symfony v6.4.* to Symfony 7.2.*
+composer.json change "symfony/6.4.*" into "symfony/7.2.*"
+composer update -W
+
+========================================================================================================================
+========================================================================================================================
+22. use Messenger to publish a message to rabbitmq exchange, and a rabbitmq consumer consumes the message and saves in db
+cron which publish messenger message to rabbitmq exchange
+rabbitmq consumer which gets the message and saves it into db
+
+ - use case start:
+1 TestBCommand cron
+    1.1 $bus->dispatch($testBMessengerMessage = new TestBMessengerMessage())
+    1.2 TestBMessengerMessageHandler
+        1.2.1 $testBProducer->publish(json_encode($testBMessengerMessage->getName(), $testBMessengerMessage->getAge()))
+
+2 TestBConsumer consumer
+    execute(AMQPMessage $msg, EntityManagerInterface $em)
+        $message = json_decode($msg->getBody());
+        $em->persist(new TestBEntity()->setName($message['name'])->setAge($message['age']))
+        $em->flush()
+ - use case end:
+
+
+
+
+### config/packages/doctrine.yaml
+TestBundle:
+    type: attribute
+    is_bundle: true
+    dir: 'TestBundle/src/Entity'
+    prefix: 'App\Bundles\TestBundle\src\Entity'
+    alias: TestBundle
+
+
+### config/packages/old_sound_rabbit_mq.yaml
+producers:
+    polavis_test_b:
+        connection: default
+        exchange_options: { name: 'polavis-test-b', type: direct }
+        class: App\Bundles\TestBundle\src\Producer\TestBProducer
+
+consumers:
+    polavis_test_b_internal:
+        connection: default
+        exchange_options: { name: 'polavis-test-b', type: direct }
+        queue_options: { name: 'polavis-internal-test-b-queue' }
+        callback: App\Bundles\TestBundle\src\Consumer\PolavisInternalTestBConsumer
+
+### config/services.yaml
+App\Bundles\TestBundle\src\Producer\TestBProducer: '@old_sound_rabbit_mq.polavis_test_b_producer'
+
+### docker/supervisor/polavis-supervisor.conf
+[program:polavis-rabbitmq-test-b-internal]
+command=php /var/www/polavis/bin/console rabbitmq:consumer polavis_test_b_internal
+process_name=%(program_name)s_%(process_num)02d
+numprocs=1
+startsecs=0
+autostart=true
+autorestart=true
+user=www-data
+stopwaitsecs=60
+stderr_logfile=/var/log/polavis-rabbitmq-test-b-internal.err.log
+stdout_logfile=/var/log/polavis-rabbitmq-test-b-internal.out.log
+
+
+### migrations/Version20241223192446.php
+<?php
+
+declare(strict_types=1);
+
+namespace DoctrineMigrations;
+
+use Doctrine\DBAL\Schema\Schema;
+use Doctrine\Migrations\AbstractMigration;
+
+/**
+ * Auto-generated Migration: Please modify to your needs!
+ */
+final class Version20241223192446 extends AbstractMigration
+{
+    public function getDescription(): string
+    {
+        return '';
+    }
+
+    public function up(Schema $schema): void
+    {
+        // this up() migration is auto-generated, please modify it to your needs
+        $this->addSql('CREATE TABLE test_bentity (id INT AUTO_INCREMENT NOT NULL, name VARCHAR(255) NOT NULL, age INT NOT NULL, created_at DATETIME NOT NULL, PRIMARY KEY(id)) DEFAULT CHARACTER SET utf8mb4 COLLATE `utf8mb4_unicode_ci` ENGINE = InnoDB');
+    }
+
+    public function down(Schema $schema): void
+    {
+        // this down() migration is auto-generated, please modify it to your needs
+        $this->addSql('DROP TABLE test_bentity');
+    }
+}
+
+
+
+### src/Bundles/TestBundle/src/Command/TestBCommand.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Bundles\TestBundle\src\Command;
+
+use App\Bundles\TestBundle\src\Entity\TestBEntity;
+use App\Bundles\TestBundle\src\Message\TestBMessengerMessage;
+use Symfony\Component\Console\Attribute\AsCommand;
+use Symfony\Component\Console\Command\Command;
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Output\OutputInterface;
+use Symfony\Component\Messenger\MessageBusInterface;
+
+#[AsCommand(
+    name: 'test-bundle:test-b',
+    description: 'Command for cron which runs every minute, and uses Symfony Messenger to send a message to rabbitmq producer',
+)]
+class TestBCommand extends Command
+{
+    public function __construct(private readonly MessageBusInterface $bus)
+    {
+        parent::__construct();
+    }
+
+    public function execute(InputInterface $input, OutputInterface $output): int
+    {
+        $testBEntity = (new TestBEntity())->setName('test-b')->setAge(11);
+        $testBMessengerMessage = new TestBMessengerMessage($testBEntity);
+        $this->bus->dispatch($testBMessengerMessage);
+
+        $output->writeln('[' . (new \DateTime())->format('Y-m-d H:i:s') . '] Dispatched Symfony Messenger test-bundle:test-b');
+
+        return Command::SUCCESS;
+    }
+}
+
+
+### src/Bundles/TestBundle/src/Consumer/PolavisInternalTestBConsumer.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Bundles\TestBundle\src\Consumer;
+
+use App\Bundles\TestBundle\src\Entity\TestBEntity;
+use Doctrine\ORM\EntityManagerInterface;
+use OldSound\RabbitMqBundle\RabbitMq\ConsumerInterface;
+use PhpAmqpLib\Message\AMQPMessage;
+
+class PolavisInternalTestBConsumer implements ConsumerInterface
+{
+    public function __construct(private readonly EntityManagerInterface $entityManager)
+    {
+    }
+
+    public function execute(AMQPMessage $msg): void
+    {
+        try {
+            $message = json_decode($msg->getBody(), true, 512, JSON_THROW_ON_ERROR);
+        } catch (\Exception $exception) {
+            #add log
+            #kibana
+            #grafana
+            #logstash
+            #elastic
+            #alert email
+            return;
+        }
+
+        $entity = (new TestBEntity())
+            ->setName($message['name'])
+            ->setAge($message['age'])
+            ->setCreatedAt(new \DateTime());
+        $this->entityManager->persist($entity);
+        $this->entityManager->flush();
+    }
+}
+
+
+### src/Bundles/TestBundle/src/Entity/TestBEntity.php
+<?php
+
+namespace App\Bundles\TestBundle\src\Entity;
+
+use App\Bundles\TestBundle\src\Repository\TestBEntityRepository;
+use Doctrine\DBAL\Types\Types;
+use Doctrine\ORM\Mapping as ORM;
+
+#[ORM\Entity(repositoryClass: TestBEntityRepository::class)]
+class TestBEntity
+{
+    #[ORM\Id]
+    #[ORM\GeneratedValue]
+    #[ORM\Column]
+    private ?int $id = null;
+
+    #[ORM\Column(length: 255)]
+    private ?string $name = null;
+
+    #[ORM\Column]
+    private ?int $age = null;
+
+    #[ORM\Column(type: Types::DATETIME_MUTABLE)]
+    private ?\DateTimeInterface $createdAt = null;
+
+    public function getId(): ?int
+    {
+        return $this->id;
+    }
+
+    public function getName(): ?string
+    {
+        return $this->name;
+    }
+
+    public function setName(string $name): static
+    {
+        $this->name = $name;
+
+        return $this;
+    }
+
+    public function getAge(): ?int
+    {
+        return $this->age;
+    }
+
+    public function setAge(int $age): static
+    {
+        $this->age = $age;
+
+        return $this;
+    }
+
+    public function getCreatedAt(): ?\DateTimeInterface
+    {
+        return $this->createdAt;
+    }
+
+    public function setCreatedAt(\DateTimeInterface $createdAt): static
+    {
+        $this->createdAt = $createdAt;
+
+        return $this;
+    }
+}
+
+
+### src/Bundles/TestBundle/src/Message/TestBMessengerMessage.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Bundles\TestBundle\src\Message;
+
+use App\Bundles\TestBundle\src\Entity\TestBEntity;
+
+/**
+ * @see TestBMessengerMessageHandler
+ */
+class TestBMessengerMessage
+{
+    public function __construct(private readonly TestBEntity $testBEntity)
+    {
+    }
+
+    public function getTestBEntityName(): string
+    {
+        return $this->testBEntity->getName();
+    }
+
+    public function getTestBEntityAge(): int
+    {
+        return $this->testBEntity->getAge();
+    }
+}
+
+
+### src/Bundles/TestBundle/src/Message/TestBMessengerMessageHandler.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Bundles\TestBundle\src\Message;
+
+use App\Bundles\TestBundle\src\Producer\TestBProducer;
+use Symfony\Component\Messenger\Attribute\AsMessageHandler;
+
+#[AsMessageHandler]
+class TestBMessengerMessageHandler
+{
+    public function __construct(private readonly TestBProducer $testBProducer)
+    {
+    }
+
+    public function __invoke(TestBMessengerMessage $message): void
+    {
+        $this->testBProducer->publish(
+            json_encode([
+                'name' => $message->getTestBEntityName(),
+                'age' => $message->getTestBEntityAge()
+            ])
+        );
+    }
+}
+
+
+### src/Bundles/TestBundle/src/Producer/TestBProducer.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Bundles\TestBundle\src\Producer;
+
+use OldSound\RabbitMqBundle\RabbitMq\Producer;
+
+class TestBProducer extends Producer
+{
+}
+
+
+### src/Bundles/TestBundle/src/Repository/TestBEntityRepository.php
+<?php
+
+namespace App\Bundles\TestBundle\src\Repository;
+
+use App\Bundles\TestBundle\src\Entity\TestBEntity;
+use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
+use Doctrine\Persistence\ManagerRegistry;
+
+/**
+ * @extends ServiceEntityRepository<TestBEntity>
+ */
+class TestBEntityRepository extends ServiceEntityRepository
+{
+    public function __construct(ManagerRegistry $registry)
+    {
+        parent::__construct($registry, TestBEntity::class);
+    }
+
+    //    /**
+    //     * @return TestBEntity[] Returns an array of TestBEntity objects
+    //     */
+    //    public function findByExampleField($value): array
+    //    {
+    //        return $this->createQueryBuilder('t')
+    //            ->andWhere('t.exampleField = :val')
+    //            ->setParameter('val', $value)
+    //            ->orderBy('t.id', 'ASC')
+    //            ->setMaxResults(10)
+    //            ->getQuery()
+    //            ->getResult()
+    //        ;
+    //    }
+
+    //    public function findOneBySomeField($value): ?TestBEntity
+    //    {
+    //        return $this->createQueryBuilder('t')
+    //            ->andWhere('t.exampleField = :val')
+    //            ->setParameter('val', $value)
+    //            ->getQuery()
+    //            ->getOneOrNullResult()
+    //        ;
+    //    }
+}
+
+
+### sudo crontab -e
+* * * * * docker exec polavis-php-container php bin/console test-bundle:test-b >> /var/www/polavis/var/log/polavis-test-b.log 2>&1
+
+sudo service cron reload
+
+sudo service cron status
+
+========================================================================================================================
+========================================================================================================================
+21. polavis-app create producer & polavis2-app create consumer
+
+### polavis/config/packages/old_sound_rabbit_mq.yaml
+old_sound_rabbit_mq:
+    producers:
+        polavis_test_a:
+            connection: default
+            exchange_options: { name: 'polavis-test-a', type: direct }
+            class: App\Bundles\TestBundle\src\Producer\TestAProducer
+
+### polavis/config/services.yaml
+services:
+    App\Bundles\TestBundle\src\Producer\TestAProducer: '@old_sound_rabbit_mq.polavis_test_a_producer'
+
+### polavis/src/Bundles/TestBundle/src/Producer/TestAProducer.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Bundles\TestBundle\src\Producer;
+
+use OldSound\RabbitMqBundle\RabbitMq\Producer;
+
+class TestAProducer extends Producer
+{
+    //produces a message to be published on polavis-rabbitmq "polavis-test-a" exchange
+    //which will be consumed by polavis2-rabbitmq test-a-queue
+}
+
+### polavis/src/Bundles/TestBundle/src/Command/TestACommand.php
+<?php
+
+namespace App\Bundles\TestBundle\src\Command;
+
+use App\Bundles\TestBundle\src\Producer\TestAProducer;
+use Symfony\Component\Console\Attribute\AsCommand;
+use Symfony\Component\Console\Command\Command;
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Output\OutputInterface;
+
+#[AsCommand(
+    name: 'test-bundle:test-a',
+    description: 'Command for cron which runs every minute, which sends a message to rabbitmq - which will be consumed by polavis2 test-a-consumer',
+)]
+class TestACommand extends Command
+{
+    public function __construct(private readonly TestAProducer $testAProducer)
+    {
+        parent::__construct();
+    }
+
+    protected function execute(InputInterface $input, OutputInterface $output): int
+    {
+        $this->testAProducer->publish(json_encode(['name' => 'test-a-name [polavis->'. __METHOD__ .']', 'age' => 10]));
+
+        $output->writeln('[' . (new \DateTime())->format('Y-m-d H:i:s') . ']'.' Test-a command executed');
+
+        return Command::SUCCESS;
+    }
+}
+
+
+
+
+
+### polavis2/config/packages/old_sound_rabbit_mq.yaml
+old_sound_rabbit_mq:
+    consumers:
+        polavis_test_a:
+            connection: polavis
+            exchange_options: { name: 'polavis-test-a', type: direct }
+            queue_options: { name: 'polavis-test-a-queue' }
+            callback: App\Bundles\TestBundle\src\Consumer\PolavisTestAConsumer
+
+### polavis2/src/Bundles/TestBundle/src/Consumer/PolavisTestAConsumer.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Bundles\TestBundle\src\Consumer;
+
+use App\Bundles\TestBundle\src\Entity\TestEntity;
+use Doctrine\ORM\EntityManagerInterface;
+use OldSound\RabbitMqBundle\RabbitMq\ConsumerInterface;
+use PhpAmqpLib\Message\AMQPMessage;
+
+class PolavisTestAConsumer implements ConsumerInterface
+{
+    public function __construct(private readonly EntityManagerInterface $entityManager)
+    {
+    }
+
+    public function execute(AMQPMessage $msg): void
+    {
+        try {
+            $testSupervisorCronArray = json_decode($msg->getBody(), true, 512, JSON_THROW_ON_ERROR);
+        } catch (\Exception $exception) {
+            #add log
+            #kibana
+            #grafana
+            #logstash
+            #elastic
+            #alert email
+            return;
+        }
+
+        $entity = (new TestEntity())
+            ->setName($testSupervisorCronArray['name'] ?? '')
+            ->setAge($testSupervisorCronArray['age'] ?? 0)
+            ->setCreatedAt(new \DateTime());
+        $this->entityManager->persist($entity);
+        $this->entityManager->flush();
+    }
+}
+
+
+### polavis2/docker/supervisor/polavis2-supervisor.conf
+[program:polavis-test-a]
+command=php /var/www/polavis2/bin/console rabbitmq:consumer polavis_test_a
+process_name=%(program_name)s_%(process_num)02d
+numprocs=1
+startsecs=0
+autostart=true
+autorestart=true
+user=www-data
+stopwaitsecs=60
+stderr_logfile=/var/log/polavis-test-a.err.log
+stdout_logfile=/var/log/polavis-test-a.out.log
+
+========================================================================================================================
+========================================================================================================================
+20. create bundle make commands:
+php bin/console make:entity
+    > \App\Bundles\TestBundle\src\Entity\TestEntity
+created: src/Bundles/TestBundle/src/Entity/TestEntity.php
+created: src/Repository/Bundles/TestBundle/src/Entity/TestEntityRepository.php
+
+php bin/console make:command
+    > \App\Bundles\TestBundle\src\Command\TestCommand
+created: src/Bundles/TestBundle/src/Command/TestCommand.php
+
+php bin/console make:message
+    > \App\Bundles\TestBundle\src\Messenger\TestOnlyMessengerMessage
+    [1] async
+created: src/Bundles/TestBundle/src/Messenger/TestOnlyMessengerMessage.php
+created: src/Bundles/TestBundle/src/Messenger/TestOnlyMessengerMessageHandler.php
+updated: config/packages/messenger.yaml
+
+========================================================================================================================
+========================================================================================================================
+
+19. create bundle
+### composer.json
+"autoload": {
+    "psr-4": {
+        //...,
+        "TestBundle\\": "src/"
+    }
+}.,
+"autoload-dev": {
+    "psr-4": {
+        //...,
+        "TestBundle\\Tests\\": "tests/"
+    }
+}
+
+### config/bundles.php
+App\Bundles\TestBundle\TestBundle::class => ['all' => true],
+
+### config/routes.yaml
+test_bundle:
+    resource:
+        path: ../src/Bundles/TestBundle/src/Controller/
+        namespace: App\Bundles\TestBundle\src\Controller
+    type: attribute
+
+### config/services.yaml
+services:
+    #...
+    App\Bundles\TestBundle\:
+        resource: '../src/Bundles/TestBundle/*'
+        exclude:
+            - '../src/Bundles/TestBundle/src/DependencyInjection/'
+            - '../src/Bundles/TestBundle/src/Entity/'
+            - '../src/Bundles/TestBundle/src/TestBundle.php'
+
+### src/Bundles/TestBundle/TestBundle.php
+<?php
+declare(strict_types=1);
+namespace App\Bundles\TestBundle;
+use Symfony\Component\HttpKernel\Bundle\AbstractBundle;
+class TestBundle extends AbstractBundle
+{
+}
+
+### src/Bundles/TestBundle/src/Controller/TestController.php
+<?php
+namespace App\Bundles\TestBundle\src\Controller;
+use App\Bundles\TestBundle\src\Service\TestService;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpKernel\Attribute\AsController;
+use Symfony\Component\Routing\Attribute\Route;
+#[AsController]
+class TestController
+{
+    #[Route(path: '/new-testing', name: 'new_testing', methods: ['GET'])]
+    public function __invoke(TestService $testService): Response
+    {
+        return new Response('Hello World from ' . __METHOD__.'. Also hello from service: ' . $testService->whatever());
+    }
+}
+
+### src/Bundles/TestBundle/src/Service/TestService.php
+<?php
+declare(strict_types=1);
+namespace App\Bundles\TestBundle\src\Service;
+class TestService
+{
+    public function whatever(): string
+    {
+        return __METHOD__.' '.__LINE__;
+    }
+}
+
+========================================================================================================================
+========================================================================================================================
+18. git pull --rebase
+
+git pull --rebase
+OBS if there are conflicts:
+    $ git rebase --abort
+    $ git pull   #OBS solve the conflicts at this step
+    $ git pull --rebase
+
+========================================================================================================================
+========================================================================================================================
+17. docker supervisor and crontab
+
+### docker/php/Dockerfile
+RUN apt-get update && ...
+    unzip \
+    supervisor \
+
+...
+WORKDIR /var/www/polavis/
+COPY ./supervisor/polavis-supervisor.conf /etc/supervisor/conf.d/polavis-supervisor.conf
+CMD ["/usr/bin/supervisord", "-n"]
+
+OBS  to add more programs:
+### $ cd polavis && mkdir docker/supervisor && touch docker/supervisor/polavis-supervisor.conf
+[program:php-fpm]
+command=php-fpm
+autostart=true
+autorestart=true
+stderr_logfile=/var/log/php-fpm.err.log
+stdout_logfile=/var/log/php-fpm.log
+
+[program:app-test]
+command=php /var/www/polavis/bin/console app:test
+process_name=%(program_name)s_%(process_num)02d
+numprocs=1
+startsecs=0
+autostart=true
+autorestart=true
+user=www-data
+stopwaitsecs=60
+stderr_logfile=/var/log/app-test.err.log
+stdout_logfile=/var/log/app-test.out.log
+
+[program:polavis-rabbitmq-internal]
+command=php /var/www/polavis/bin/console rabbitmq:consumer polavis_internal
+process_name=%(program_name)s_%(process_num)02d
+numprocs=1
+startsecs=0
+autostart=true
+autorestart=true
+user=www-data
+stopwaitsecs=60
+stderr_logfile=/var/log/polavis-rabbitmq-internal.err.log
+stdout_logfile=/var/log/polavis-rabbitmq-internal.out.log
+
+[program:messenger-consume]
+command=php /var/www/polavis/bin/console messenger:consume async --time-limit=3600 --memory-limit=128M
+process_name=%(program_name)s_%(process_num)02d
+numprocs=1
+startsecs=0
+autostart=true
+autorestart=true
+user=www-data
+stopwaitsecs=60
+stderr_logfile=/var/log/messenger-consume.err.log
+stdout_logfile=/var/log/messenger-consume.out.log
+
+
+
+$ sudo docker exec -it polavis-php-container bash
+# vi /etc/supervisor/supervisord.conf    #this is the main config file which includes all files in /etc/supervisor/conf.d/ - this is the location where all custom files which defines programs should be placed, fe like in php/Dockerfile
+# ls -al /etc/supervisor/conf.d/
+# vi /etc/supervisor/conf.d/polavis-supervisor.conf
+# supervisorctl reload                   #after adding more program-s, reload supervisor
+# supervisorctl status
+app-test:app-test_00                     RUNNING   pid 24789, uptime 0:00:00
+crontab                                  RUNNING   pid 8, uptime 0:07:26
+messenger-consume:messenger-consume_00   RUNNING   pid 24786, uptime 0:00:00
+php-fpm                                  RUNNING   pid 10, uptime 0:07:26
+
+
+OBS to check if the processes are running for a specific ALIAS, for example app-test command:
+sudo docker exec -it polavis-php-container bash
+tail -f /var/log/app-test.out.log
+#here it should print whatever the command is doing, fe I created a simple app-test command which $output->writeln('Test command');
+Test command
+Test command
+etc
+
+
+
+
+!!!!!!! USE CASE !!!!!!!
+
+cron which runs every second and publishes a new rabbitmq message
+rabbitmq consumer which runs through supervisor and consumes each message and then saves into db the message
+
+
+ERROR TRIED TO MAKE NEW ENTITY SO I CAN SAVE THE PUBLISHED MESSAGE THROUGH CONSOLE COMMAND AND THEN CONSUMED BY CONSUMER:
+php bin/console make:entity
+
+In DefinitionErrorExceptionPass.php line 51:
+
+  Cannot autowire service "App\Producer\InternalProducer": argument "$conn" of method "OldSound\RabbitMqBundle\RabbitMq\BaseAmqp::__construct()" references class "PhpAmqpLib\Connection\AbstractConnection" but no such
+   service exists. You should maybe alias this class to one of these existing services: "old_sound_rabbit_mq.connection.default", "old_sound_rabbit_mq.connection.polavis2".
+FIX: in App\Command\TestSupervisorAndCronCommand I modified:
+public function __construct(
+    - private readonly InternalProducer $internalProducer
+    + private readonly ProducerInterface $internalProducer
+)
+
+ERROR AFTER ABOVE FIX:
+php bin/console make:entity
+
+In DefinitionErrorExceptionPass.php line 51:
+
+  Cannot autowire service "App\Command\TestSupervisorAndCronCommand": argument "$internalProducer" of method "__construct()" references interface "OldSound\RabbitMqBundle\RabbitMq\ProducerInterface" but no such servi
+  ce exists. Did you mean to target one of "polavisProducer", "polavis_createProducer", "author_createProducer", "polavis_internal_testProducer" instead?
+FIX:
+### services.yaml
+services:
+    App\Producer\InternalProducer: '@old_sound_rabbit_mq.polavis_internal_test_producer'
+
+
+
+### config/packages/old_sound_rabbit_mq.yaml
+old_sound_rabbit_mq:
+    connections:
+        default:
+            url: '%env(RABBITMQ_URL)%'
+    producers:
+        polavis_internal_test:
+            connection: default
+            exchange_options: { name: 'polavis-internal-test', type: direct }
+            class: App\Producer\InternalProducer
+
+    consumers:
+        polavis_internal:
+            connection: default
+            exchange_options: { name: 'polavis-internal-test', type: direct }
+            queue_options: { name: 'polavis-internal-queue' }
+            callback: App\Consumer\PolavisInternalConsumer
+
+
+
+### src/Producer/InternalProducer.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Producer;
+
+use OldSound\RabbitMqBundle\RabbitMq\Producer;
+
+class InternalProducer extends Producer
+{
+}
+
+
+
+### src/Consumer/PolavisInternalConsumer.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Consumer;
+
+use App\Entity\TestSupervisorCron;
+use Doctrine\ORM\EntityManagerInterface;
+use OldSound\RabbitMqBundle\RabbitMq\ConsumerInterface;
+use PhpAmqpLib\Message\AMQPMessage;
+
+class PolavisInternalConsumer implements ConsumerInterface
+{
+    public function __construct(private readonly EntityManagerInterface $entityManager)
+    {
+    }
+
+    /**
+     * @throws \JsonException
+     */
+    public function execute(AMQPMessage $msg): void
+    {
+        try {
+            $testSupervisorCronArray = json_decode($msg->getBody(), true, 512, JSON_THROW_ON_ERROR);
+        } catch (\Throwable $exception) {
+            #add log
+            #kibana
+            #grafana
+            #logstash
+            #elastic
+            #alert email
+            return;
+        }
+
+        $entity = (new TestSupervisorCron())
+            ->setName($testSupervisorCronArray['name'])
+            ->setAge($testSupervisorCronArray['age'])
+            ->setCreatedAt(new \DateTime());
+        $this->entityManager->persist($entity);
+        $this->entityManager->flush();
+    }
+}
+
+
+
+### src/Entity/TestSupervisorCron.php
+<?php
+
+namespace App\Entity;
+
+use App\Repository\TestSupervisorCronRepository;
+use Doctrine\ORM\Mapping as ORM;
+
+#[ORM\Entity(repositoryClass: TestSupervisorCronRepository::class)]
+class TestSupervisorCron
+{
+    #[ORM\Id]
+    #[ORM\GeneratedValue]
+    #[ORM\Column]
+    private ?int $id = null;
+
+    #[ORM\Column(length: 255)]
+    private ?string $name = null;
+
+    #[ORM\Column]
+    private ?int $age = null;
+
+    #[ORM\Column(nullable: true)]
+    private ?\DateTime $createdAt = null;
+
+    public function __construct()
+    {
+        $this->createdAt = new \DateTime();
+    }
+
+    public function getId(): ?int
+    {
+        return $this->id;
+    }
+
+    public function getName(): ?string
+    {
+        return $this->name;
+    }
+
+    public function setName(string $name): self
+    {
+        $this->name = $name;
+
+        return $this;
+    }
+
+    public function getAge(): ?int
+    {
+        return $this->age;
+    }
+
+    public function setAge(int $age): self
+    {
+        $this->age = $age;
+
+        return $this;
+    }
+
+    public function getCreatedAt(): ?\DateTime
+    {
+        return $this->createdAt;
+    }
+
+    public function setCreatedAt(?\DateTime $createdAt): self
+    {
+        $this->createdAt = $createdAt;
+
+        return $this;
+    }
+}
+
+
+
+### src/Command/TestSupervisorAndCronCommand.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Command;
+
+use App\Producer\InternalProducer;
+use Symfony\Component\Console\Attribute\AsCommand;
+use Symfony\Component\Console\Command\Command;
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Output\OutputInterface;
+
+#[AsCommand(name: 'app:test-supervisor-and-cron', description: 'Test supervisor and cron jobs')]
+class TestSupervisorAndCronCommand extends Command
+{
+    public function __construct(private readonly InternalProducer $internalProducer)
+    {
+        parent::__construct();
+    }
+
+    protected function execute(InputInterface $input, OutputInterface $output): int
+    {
+        $this->internalProducer->publish(json_encode(['name' => 'testing-name', 'age' => 10]));
+
+        $output->writeln(
+            '['.(new \DateTime())->format('Y-m-d H:i:s').'] '.
+            'Successfully published test supervisor-cron rabbitmq message'
+        );
+
+        return Command::SUCCESS;
+    }
+}
+
+
+
+
+### docker/supervisor/supervisor.conf
+[program:php-fpm]
+command=php-fpm
+autostart=true
+autorestart=true
+stderr_logfile=/var/log/php-fpm.err.log
+stdout_logfile=/var/log/php-fpm.log
+
+[program:polavis-rabbitmq-internal]
+command=php /var/www/polavis/bin/console rabbitmq:consumer polavis_internal
+process_name=%(program_name)s_%(process_num)02d
+numprocs=1
+startsecs=0
+autostart=true
+autorestart=true
+user=www-data
+stopwaitsecs=60
+stderr_logfile=/var/log/polavis-rabbitmq-internal.err.log
+stdout_logfile=/var/log/polavis-rabbitmq-internal.out.log
+
+[program:messenger-consume]
+command=php /var/www/polavis/bin/console messenger:consume async --time-limit=3600 --memory=128M
+process_name=%(program_name)s_%(process_num)02d
+numprocs=1
+startsecs=0
+autostart=true
+autorestart=true
+user=www-data
+stopwaitsecs=60
+stderr_logfile=/var/log/messenger-consume.err.log
+stdout_logfile=/var/log/messenger-consume.out.log
+
+
+
+### polavis/docker/docker-compose.yaml
+services:
+    polavis-php-service:
+        volumes:
+            - ./supervisor/:/var/www/polavis/var/log/supervisor  ## ADDED THIS LINE
+
+
+
+
+### polavis/docker/php/Dockerfile
+WORKDIR /var/www/polavis/
+
+COPY ./supervisor/polavis-supervisor.conf /etc/supervisor/conf.d/polavis-supervisor.conf   ## ADDED THIS LINE
+
+
+
+
+IN MY LINUX MACHINE (LAPTOP) CREATE A NEW CRONTAB FOR root USER!
+$ cd /etc/cron.d$ sudo crontab -e
+no crontab for root - using an empty one
+
+Select an editor.  To change later, run 'select-editor'.
+  1. /bin/nano       <---- easiest
+  2. /usr/bin/vim.tiny
+  3. /bin/ed
+
+Choose 1-3 [1]: 1
+
+!!!!! ADD THIS LINE OF CODE AFTER ALL COMMENTS INSIDE THE OPENED FILE: THIS WILL RUN CRON EVERY MINUTE
+
+* * * * * docker exec polavis-php-container php bin/console app:test-supervisor-and-cron >> /var/www/polavis/var/log/polavis-cron.log 2>&1
+
+
+crontab: installing new crontab
+dancostinel@dancostinel-LOQ-15IRX9:/etc/cron.d/$ sudo crontab -u root -l
+
+* * * * * docker exec polavis-php-container php bin/console app:test-supervisor-and-cron >> /var/www/polavis/var/log/polavis-cron.log 2>&1
+
+dancostinel@dancostinel-LOQ-15IRX9:/etc/cron.d/$ sudo service cron reload
+ * Reloading configuration files for periodic command scheduler cron
+
+dancostinel@dancostinel-LOQ-15IRX9:/etc/cron.d/$ sudo service cron status
+
+
+
+CHECK LOGS:
+sudo docker exec -it polavis-php-container bash
+root@3976473f2f9f:/var/www/polavis# tail -f var/log/polavis-cron.log
+
+
+
+# OBS restart all supervisor processes:
+root@3976473f2f9f:/var/www/polavis# supervisorctl restart all
+
+# OBS stop all supervisor processes:
+root@3976473f2f9f:/var/www/polavis# supervisorctl stop all
+
+# OBS check supervisor status
+root@3976473f2f9f:/var/www/polavis# supervisorctl status
+
+OBS restart specific process
+supervisorctl stop messenger-consume:messenger-consume_00
+supervisorctl start messenger-consume:messenger-consume_00
+  OR
+supervisorctl restart messenger-consume:messenger-consume_00
+
+========================================================================================================================
+========================================================================================================================
+
+16. phpstan/phpstan: https://packagist.org/packages/phpstan/phpstan
+
+$ docker exec polavis-php-container php -dmemory_limit=256M vendor/bin/phpstan analyze src --level=6
+ 103/103 [▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓] 100%
+
+ ------ ---------------------------------------------------
+  Line   Service/Api/Author/ApiAuthorService.php
+ ------ ---------------------------------------------------
+  114    Access to private constant AUTHOR_AUTHOR of class
+         App\Voter\AuthorAuthorVoter.
+  135    Access to private constant AUTHOR_AUTHOR of class
+         App\Voter\AuthorAuthorVoter.
+ ------ ---------------------------------------------------
+
+
+ [ERROR] Found 2 errors
+========================================================================================================================
+========================================================================================================================
+15. rector/rector: https://packagist.org/packages/rector/rector
+$ docker exec polavis-php-container composer require --dev rector/rector
+
+$ docker exec polavis-php-container php vendor/bin/rector
+
+ No "rector.php" config found. Should we generate it for you? [yes]:
+ >
+
+ [OK] The config is added now. Re-run command to make Rector do the work!
+
+$ docker exec polavis-php-container php vendor/bin/rector
+ 108/108 [▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓] 100%
+
+ [OK] Rector is done!
+
+========================================================================================================================
+========================================================================================================================
+14. symplify/easy-coding-standard: https://packagist.org/packages/symplify/easy-coding-standard
+$ docker exec polavis-php-container composer require symplify/easy-coding-standard --dev
+
+$ docker exec polavis-php-container php vendor/bin/ecs
+
+ No "ecs.php" config found. Should we generate it for you? [yes]:
+ >
+
+ [OK] The ecs.php config was generated! Re-run the command to tidy your code
+
+$ docker exec polavis-php-container php vendor/bin/ecs
+   0/107 [░░░░░░░░░░░░░░░░░░░░░░░░░░░░]   0%
+  40/107 [▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░]  37%
+  80/107 [▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░]  74%
+ 107/107 [▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓] 100%
+
+ [OK] No errors found. Great job - your code is shiny in style!
+
+
+FIX ERRORS:
+$ docker exec polavis-php-container php vendor/bin/ecs --fix
+
+CLEAR CACHE:
+$ docker exec polavis-php-container php vendor/bin/ecs --clear-cache
+
+CHECK ALL USED RULES:
+$ docker exec polavis-php-container php vendor/bin/ecs list-checkers --output-format json
+
+========================================================================================================================
+========================================================================================================================
+13. Design patterns: Decorator
+
+### vendor/some-package/HtmlElementInterface.php
+interface HtmlElementInterface
+{
+    public function toHtml(): string;
+}
+
+### vendor/some-package/Image.php
+final class Image implements HtmlElementInterface
+{
+    public function __construct(private readonly string $src) {}
+
+    public function toHtml(): string
+    {
+        return '<img src=">' . $this->src . ' "/>';
+    }
+}
+
+USAGE:
+### polavis-app/src/Controller/DecoratorController.php
+<?php
+
+use some-package\Image;
+
+#[AsController]
+class DecoratorController
+{
+    public function __invoke(): Response
+    {
+        $source = 'https://placehold.co/300x300';
+        $img = new Image($source);
+        return new Response($img->toHtml());
+    }
+}
+
+
+BUT WHAT IF WE WANT TO WRAP-UP THE img HTML ELEMENT INTO AN ANCHOR (<a></a>)?
+
+
+
+### polavis-app/src/Contracts/AbstractHtmlDecorator.php
+<?php
+
+namespace App\Contracts;
+
+use some-package\HtmlElementInterface;
+
+abstract class AbstractHtmlDecorator implements HtmlElementInterface
+{
+    public function __construct(protected HtmlElementInterface $element) {}
+}
+
+
+
+### polavis-app/src/Service/LinkDecorator.php
+<?php
+
+namespace App\Service;
+
+use App\Contracts\AbstractHtmlDecorator;
+
+class LinkDecorator extends AbstractHtmlDecorator
+{
+    public function __construct(private readonly string $url, HtmlElementInterface $element)
+    {
+        parent::__construct($element);
+    }
+
+    public function toHtml(): string
+    {
+        return '<a href="' . $this->url . '">' . $this->element->toHtml() .'</a>';
+    }
+}
+
+
+USAGE:
+### polavis-app/src/Controller/DecoratorController.php
+<?php
+
+use App\Service\LinkDecorator;
+use some-package\Image;
+
+#[AsController]
+class DecoratorController
+{
+    public function __invoke(): Response
+    {
+        $source = 'https://placehold.co/300x300';
+        $element = new Image($source);
+        $element = new LinkDecorator('https://www.google.com', $element);
+
+        return new Response($element->toHtml());
+    }
+}
+
+# EXPECTED RESULT:
+<a href="https://www.google.com">
+    <img src="https://placehold.co/300x300" />
+</a>
+========================================================================================================================
+========================================================================================================================
+12. Symfony HttpClientInterface, http client, http-client
+
+### .env
+POLAVIS2_URL='http://polavis2-nginx-container:80'
+POLAVIS_URL='http://polavis-nginx-container:80'
+# WHEN WORKING WITH DOCKER:
+# polavis-app-nginx-container?
+# polavis-app-php-container
+# polavis2-app-nginx-container?
+# polavis2-app-php-container
+# NEEDS TO BE IN THE SAME NETWORK
+
+### src/Controller/HttpClientController.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Controller;
+
+use Symfony\Component\DependencyInjection\Attribute\Autowire;
+use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpKernel\Attribute\AsController;
+use Symfony\Component\Routing\Attribute\Route;
+use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
+use Symfony\Contracts\HttpClient\HttpClientInterface;
+
+#[AsController]
+class HttpClientController
+{
+    public function __construct(
+        #[Autowire('%env(POLAVIS2_URL)%')] private readonly string $polavis2Url,
+        #[Autowire('%env(POLAVIS_URL)%')] private readonly string $polavisUrl,
+    ) {
+    }
+
+    #[Route(path: '/http-client', name: 'app_http_client', methods: ['GET'])]
+    public function __invoke(HttpClientInterface $client): JsonResponse
+    {
+        try {
+            $responsePolavis = $client->request('GET', $this->polavisUrl . '/web/testing');
+            $responsePolavis2 = $client->request('GET', $this->polavis2Url . '/resp');
+            $response = [$responsePolavis->getContent(true), $responsePolavis2->getContent(true)];
+        } catch (TransportExceptionInterface $e) {
+            return new JsonResponse($e->getMessage(), $e->getCode());
+        }
+
+        return new JsonResponse($response);
+    }
+}
+
+### polavis-app/src/Controller/ApiController.php
+<?php
+
+use Symfony\Component\HttpFoundation\JsonResponse;
+
+#[AsController]
+class ApiController
+{
+    #[Route(path: '/web/testing', name: 'web_test', methods: ['GET'])]
+    public function generateApiTestResponse(): JsonResponse
+    {
+        return new JsonResponse(json_encode(['test1' => 'test1', 'test2' => 'test2']));
+    }
+}
+
+
+### polavis2-app/src/Controller/ApiController.php
+<?php
+
+use Symfony\Component\HttpFoundation\JsonResponse;
+
+#[AsController]
+class ApiController
+{
+    #[Route(path: '/rest', name: 'resp', methods: ['GET'])]
+    public function resp(): JsonResponse
+    {
+        return new JsonResponse(json_encode(['test11' => 'test11', 'test22' => 'test22']));
+    }
+}
+
+========================================================================================================================
+========================================================================================================================
+11. Design patterns: Factory
+
+### src/Contracts/FactoryCarInterface.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Contracts;
+
+use Symfony\Component\DependencyInjection\Attribute\AutoconfigureTag;
+
+#[AutoconfigureTag(name: 'factory_design_pattern_car')]
+interface FactoryCarInterface
+{
+    public function supports(string $carName): bool;
+    public function getName(): string;
+    public function getColor(): string;
+    public function getCC(): string;
+}
+
+
+### src/Service/VolkswagenFactory.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Service;
+
+use App\Contracts\FactoryCarInterface;
+use App\Enum\CarColorEnum;
+use App\Enum\CCEnum;
+
+class VolkswagenFactory implements FactoryCarInterface
+{
+    private const string CAR = 'VW';
+
+    public function supports(string $carName): bool
+    {
+        return self::CAR === $carName;
+    }
+
+    public function getName(): string
+    {
+        return self::CAR;
+    }
+
+    public function getColor(): string
+    {
+        $colors = array_map(
+            static function (CarColorEnum $enum) { return $enum->value; },
+            CarColorEnum::cases()
+        );
+
+        return $colors[array_rand($colors)];
+    }
+
+    public function getCC(): string
+    {
+        $ccs = array_map(
+            static fn (CCEnum $enum) => $enum->value,
+            CCEnum::cases()
+        );
+
+        return $ccs[array_rand($ccs)];
+    }
+}
+
+
+### src/Service/VolvoFactory.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Service;
+
+use App\Contracts\FactoryCarInterface;
+use App\Enum\CarColorEnum;
+use App\Enum\CCEnum;
+
+class VolvoFactory implements FactoryCarInterface
+{
+    private const string CAR = 'Volvo';
+
+    public function supports(string $carName): bool
+    {
+        return self::CAR === $carName;
+    }
+
+    public function getName(): string
+    {
+        return self::CAR;
+    }
+
+    public function getColor(): string
+    {
+        $colors = array_map(
+            static function (CarColorEnum $enum) { return $enum->value; },
+            CarColorEnum::cases()
+        );
+
+        return $colors[array_rand($colors)];
+    }
+
+    public function getCC(): string
+    {
+        $ccs = array_map(
+            static fn (CCEnum $enum) => $enum->value,
+            CCEnum::cases()
+        );
+
+        return $ccs[array_rand($ccs)];
+    }
+}
+
+
+### src/Service/CarFactory.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Service;
+
+use App\Contracts\FactoryCarInterface;
+use Symfony\Component\DependencyInjection\Attribute\TaggedIterator;
+
+class CarFactory
+{
+    public function __construct(
+        #[TaggedIterator(tag: 'factory_design_pattern_car')] private readonly iterable $carFactories
+    ) {
+    }
+
+    public function getCar(string $carName): FactoryCarInterface
+    {
+        /** @var FactoryCarInterface $car */
+        foreach ($this->carFactories as $car) {
+            if ($car->supports($carName)) {
+                return $car;
+            }
+        }
+
+        throw new \InvalidArgumentException('Invalid car provided', 400);
+    }
+}
+
+
+### src/Service/CarFactoryService.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Service\DesignPatterns\Factory;
+
+use App\Exception\FactoryCarException;
+use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
+
+readonly class CarFactoryService
+{
+    public function __construct(private CarFactoryValidatorService $carFactoryValidatorService)
+    {
+    }
+
+    /**
+     * @throws BadRequestHttpException
+     * @throws FactoryCarException
+     * @throws \JsonException
+     */
+    public function getCarName(): string
+    {
+        if (!$this->carFactoryValidatorService->validate()) {
+            foreach ($this->carFactoryValidatorService->getErrors() as $field => $errorMessage) {
+                $errorMessages[] = json_encode($field . ' - ' . $errorMessage, JSON_THROW_ON_ERROR);
+            }
+
+            throw new FactoryCarException(implode(', ', $errorMessages ?? []), 400);
+        }
+
+        return $this->carFactoryValidatorService->getCarName();
+    }
+}
+
+
+### src/Service/CarFactoryValidatorService.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Service\DesignPatterns\Factory;
+
+use App\Dto\DesignPatterns\FactoryCarDto;
+use App\Exception\FactoryCarException;
+use App\Trait\ApiRequestTrait;
+use Symfony\Component\HttpFoundation\RequestStack;
+use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
+use Symfony\Component\Validator\ConstraintViolationListInterface;
+use Symfony\Component\Validator\Validator\ValidatorInterface;
+
+class CarFactoryValidatorService
+{
+    use ApiRequestTrait;
+
+    private array $errors;
+    private string $carName;
+
+    public function __construct(private readonly ValidatorInterface $validator, private readonly RequestStack $requestStack)
+    {
+    }
+
+    /**
+     * @throws BadRequestHttpException
+     * @throws FactoryCarException
+     */
+    public function validate(): bool
+    {
+        $request = $this->getRequest();
+        $apiContent = $request->getContent();
+        $carFactoryDto = new FactoryCarDto($apiContent);
+        $errors = $this->validator->validate($carFactoryDto);
+        if (count($errors)) {
+            $this->errors = $this->getFormattedErrors($errors);
+
+            return false;
+        }
+
+        $this->carName = $carFactoryDto->getCarName();
+
+        return true;
+    }
+
+    public function getCarName(): string
+    {
+        return $this->carName;
+    }
+
+    public function getErrors(): array
+    {
+        return $this->errors;
+    }
+
+    private function getFormattedErrors(ConstraintViolationListInterface $list): array
+    {
+        foreach ($list as $error) {
+            $messages[$error->getPropertyPath()] = $error->getMessage();
+        }
+
+        return $messages ?? [];
+    }
+}
+
+
+### src/Trait/ApiRequestTrait;
+<?php
+
+namespace App\Trait;
+
+use Symfony\Component\HttpFoundation\Request;
+
+trait ApiRequestTrait
+{
+    /**
+     * @throws \RuntimeException
+     */
+    public function getRequest(): Request
+    {
+        if (!isset($this->requestStack)) {
+            throw new \RuntimeException('Setup a valid request (RequestStack does not exists)', 500);
+        }
+
+        $request = $this->requestStack->getCurrentRequest();
+        if (null === $request) {
+            throw new \RuntimeException('Request is missing', 500);
+        }
+
+        return $request;
+    }
+}
+
+
+
+### src/Dto/FactoryCarDto.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Dto\DesignPatterns;
+
+use App\Exception\FactoryCarException;
+use App\Trait\ApiJsonTrait;
+use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
+use Symfony\Component\Validator\Constraints as Assert;
+
+class FactoryCarDto
+{
+    use ApiJsonTrait;
+
+    #[Assert\Type('alpha')]
+    #[Assert\Length(
+        min: 2, max: 50,
+        minMessage: 'Your name must be at least {{ limit }} characters long',
+        maxMessage: 'Your name cannot be longer than {{ limit }} characters',
+    )]
+    private mixed $car;
+
+    /**
+     * @throws BadRequestHttpException
+     * @throws FactoryCarException
+     */
+    public function __construct(private $apiContent)
+    {
+        $content = $this->getValidJson($apiContent);
+
+        if (empty($content['car'] ?? '')) {
+            throw new FactoryCarException('car property is mandatory', 400);
+        }
+
+        $this->car = $content['car'];
+    }
+
+    public function getCarName(): string
+    {
+        return $this->car;
+    }
+}
+
+
+### src/Trait/ApiJsonTrait.php
+<?php
+
+namespace App\Trait;
+
+use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
+
+trait ApiJsonTrait
+{
+    /**
+     * @throws BadRequestHttpException
+     * @throws \JsonException
+     */
+    public function getValidJson(string $apiContent): array
+    {
+        $isValidJson = json_validate($apiContent, 512, JSON_INVALID_UTF8_IGNORE);
+        if (!$isValidJson) {
+            throw new BadRequestHttpException(json_last_error_msg(), code: 400);
+        }
+
+        return json_decode($apiContent, true, 512, JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_IGNORE);
+    }
+}
+
+
+### src/Exception/FactoryCarException.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Exception;
+
+class FactoryCarException extends \Exception
+{
+}
+
+
+
+USAGE
+### src/Controller/FactoryController.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Controller;
+
+use App\Service\DesignPatterns\Factory\CarFactory;
+use App\Service\DesignPatterns\Factory\CarFactoryService;
+use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpKernel\Attribute\AsController;
+use Symfony\Component\Routing\Attribute\Route;
+
+#[AsController]
+class FactoryController
+{
+    #[Route(path: '/factory-pattern', name: 'factory_route', methods: ['POST'])]
+    public function __invoke(Request $request, CarFactory $carFactory, CarFactoryService $carFactoryService): JsonResponse
+    {
+        try {
+            $carName = $carFactoryService->getCarName();
+        } catch (\Exception $exception) {
+            return new JsonResponse($exception->getMessage(), $exception->getCode());
+        }
+
+        try {
+            $car = $carFactory->getCar($carName);
+            $response = [
+                'name' => $car->getName(),
+                'color' => $car->getColor(),
+                'cc' => $car->getCC(),
+            ];
+        } catch (\Exception $exception) {
+            $response = $exception->getMessage();
+            $code = $exception->getCode();
+        }
+
+        return new JsonResponse($response, $code ?? 200);
+    }
+}
+
+========================================================================================================================
+========================================================================================================================
+10. Design patterns: Strategy
+
+### src/Contracts/StrategyTextInterface.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Contracts;
+
+use Symfony\Component\DependencyInjection\Attribute\AutoconfigureTag;
+
+#[AutoconfigureTag(name: 'text_strategy')]
+interface StrategyTextInterface
+{
+    public function format(string $text): string;
+    public function getType(): string;
+}
+
+
+### src/Service/JsonStrategy.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Service\DesignPatterns\Strategy;
+
+use App\Contracts\StrategyTextInterface;
+
+class JsonStrategy implements StrategyTextInterface
+{
+
+    public function format(string $text): string
+    {
+        return json_encode($text);
+    }
+
+    public function getType(): string
+    {
+        return 'json';
+    }
+}
+
+
+### src/Service/CsvStrategy.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Service\DesignPatterns\Strategy;
+
+use App\Contracts\StrategyTextInterface;
+
+class CsvStrategy implements StrategyTextInterface
+{
+
+    public function format(string $text): string
+    {
+        return str_replace(' ', ',', $text);
+    }
+
+    public function getType(): string
+    {
+        return 'csv';
+    }
+}
+
+
+### src/Service/TxtStrategy.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Service\DesignPatterns\Strategy;
+
+use App\Contracts\StrategyTextInterface;
+
+class TxtStrategy implements StrategyTextInterface
+{
+
+    public function format(string $text): string
+    {
+        return $text . ' - as text';
+    }
+
+    public function getType(): string
+    {
+        return 'txt';
+    }
+}
+
+USAGE
+### src/Controller/StrategyController.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Controller\DesignPattern;
+
+use App\Contracts\StrategyTextInterface;
+use Symfony\Component\DependencyInjection\Attribute\TaggedIterator;
+use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpKernel\Attribute\AsController;
+use Symfony\Component\Routing\Annotation\Route;
+
+#[AsController]
+class StrategyController
+{
+    public function __construct(
+        #[TaggedIterator(tag: 'text_strategy')] private readonly iterable $strategies
+    )
+    {}
+
+//    #[Route(path: '/strategy-wrong-example', name: 'strategy_wrong', methods: ['POST'])]
+//    public function __invoke(Request $request): JsonResponse
+//    {
+//        $json = $request->getContent();
+//        $isValidJson = json_validate($json, 512, JSON_INVALID_UTF8_IGNORE);
+//        if (!$isValidJson) {
+//            return new JsonResponse('exception', 400);
+//        }
+//
+//        $decoded = json_decode($json, true, 512, JSON_INVALID_UTF8_IGNORE);
+//        $type = $decoded['type'] ?? null;
+//        $text = $decoded['text'] ?? null;
+//        if (null === $type || null === $text) {
+//            return new JsonResponse('Missing type and text keys', 400);
+//        }
+//
+//        $formatter = match ($type) {
+//            'json' => json_encode($text),
+//            'csv' => str_replace(' ', ',', $text),
+//            'txt' => $text . ' - this only copies the provided text and adds this text at the end',
+//            default => throw new \InvalidArgumentException('Unknown type')
+//        };
+//
+//        return new JsonResponse($formatter);
+//    }
+
+    #[Route(path: '/strategy-good-example', name: 'strategy_good', methods: ['POST'])]
+    public function __invoke(Request $request): JsonResponse
+    {
+        $json = $request->getContent();
+        $isValidJson = json_validate($json, 512, JSON_INVALID_UTF8_IGNORE);
+        if (!$isValidJson) {
+            return new JsonResponse('exception', 400);
+        }
+
+        $decoded = json_decode($json, true, 512, JSON_INVALID_UTF8_IGNORE);
+        $type = $decoded['type'] ?? null;
+        $text = $decoded['text'] ?? null;
+        if (null === $type || null === $text) {
+            return new JsonResponse('Missing type and text keys', 400);
+        }
+
+        /** @var StrategyTextInterface $strategy */
+        foreach ($this->strategies as $strategy) {
+            if ($type === $strategy->getType()) {
+                $formatted = $strategy->format($text);
+            }
+        }
+
+        $response = $formatted ?? '';
+        if (!$response) {
+            $response = 'Wrong format';
+            $code = 400;
+        }
+
+        return new JsonResponse($response, $code ?? 200);
+    }
+}
+
+### POST http://domain/strategy-good-example
+{
+    "type": "csv",
+    "text": "this is the text that needs to be transformed in csv format"
+}
+
+### EXPECTED RESULT:
+this,is,the,text,that,needs,to,be,transformed,in,csv,format
+========================================================================================================================
+========================================================================================================================
+9. Design patterns: Chain of responsibility
+
+### src/Contracts/ApiFiltersInterface.php
+<?php
+
+namespace App\Contracts;
+
+interface ApiFiltersInterface
+{
+    public function supports(string $url): bool;
+}
+
+
+### src/Dto/Api/Common/AuthorFiltersDto.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Dto\Api\Common;
+
+use App\Contracts\ApiFiltersInterface;
+use App\Dto\Api\Author\ApiAuthorValueObject;
+use App\Entity\User;
+use App\Trait\ApiJsonTrait;
+use App\Trait\UserTrait;
+use App\Validator as AppValidator;
+use Doctrine\ORM\EntityManagerInterface;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\Validator\Constraints as Assert;
+
+class AuthorFiltersDto implements ApiFiltersInterface
+{
+    use ApiJsonTrait;
+    use UserTrait;
+
+    #[Assert\NotBlank(message: 'This field is required')]
+    #[Assert\Type('alpha')]
+    #[Assert\Length(
+        min: 3, max: 50,
+        minMessage: 'Your name must be at least {{ limit }} characters long',
+        maxMessage: 'Your name cannot be longer than {{ limit }} characters',
+    )]
+    private mixed $name;
+
+    #[Assert\NotBlank(message: 'This field is required')]
+    #[Assert\Email(message: 'This field must be a valid email address')]
+    private mixed $email;
+
+    #[Assert\NotBlank(message: 'This field is required')]
+    #[Assert\Length(
+        min: 1, max: 2000000000,
+        minMessage: 'Your name must be at least {{ limit }} characters long',
+        maxMessage: 'Your name cannot be longer than {{ limit }} characters',
+    )]
+    #[AppValidator\User]
+    private mixed $userId;
+
+    public function __construct(private readonly EntityManagerInterface $em, private readonly Request $request)
+    {
+        $apiContent = $request->getContent();
+        $content = $this->getValidJson($apiContent);
+
+        $this->name = $content['name'] ?? null;
+        $this->email = $content['email'] ?? null;
+        $this->userId = $content['user_id'] ?? null;
+    }
+
+    public function supports(string $url): bool
+    {
+        $postRegex = '/\/api\/authors\//';
+        $editRegex = '/\/api\/authors\/\d+/';
+
+        return (bool) preg_match($postRegex, $url) || (bool) preg_match($editRegex, $url);
+    }
+
+    public function getName(): string
+    {
+        return $this->name;
+    }
+
+    public function getEmail(): string
+    {
+        return $this->email;
+    }
+
+    public function getUserEntity(): User
+    {
+        return $this->getUser($this->userId);
+    }
+
+    public function getAuthorValueObject(): ApiAuthorValueObject
+    {
+        return new ApiAuthorValueObject(
+            $this->getName(),
+            $this->getEmail(),
+            $this->getUser($this->userId)
+        );
+    }
+}
+
+
+### src/Dto/Api/Common/BlogFiltersDto.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Dto\Api\Common;
+
+use App\Contracts\ApiFiltersInterface;
+use App\Dto\Api\Blog\ApiBlogValueObject;
+use App\Trait\ApiAuthorTrait;
+use App\Trait\ApiCategoryTrait;
+use App\Trait\ApiJsonTrait;
+use App\Validator as AppValidator;
+use Doctrine\ORM\EntityManagerInterface;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\Validator\Constraints as Assert;
+
+class BlogFiltersDto implements ApiFiltersInterface
+{
+    use ApiJsonTrait;
+    use ApiAuthorTrait;
+    use ApiCategoryTrait;
+
+    #[Assert\NotBlank(message: 'This field is required')]
+    #[Assert\Type('string')]
+    #[Assert\Length(
+        min: 3, max: 50,
+        minMessage: 'Your name must be at least {{ limit }} characters long',
+        maxMessage: 'Your name cannot be longer than {{ limit }} characters',
+    )]
+    private mixed $title;
+
+    #[Assert\NotBlank(message: 'This field is required')]
+    #[Assert\Type('string')]
+    #[Assert\Length(
+        min: 3, max: 5000,
+        minMessage: 'Your name must be at least {{ limit }} characters long',
+        maxMessage: 'Your name cannot be longer than {{ limit }} characters',
+    )]
+    private mixed $content;
+
+    #[Assert\NotBlank(message: 'This field is required')]
+    #[Assert\DateTime(message: 'This {{ value }} value is not a valid datetime')]
+    private mixed $createdAt;
+
+    #[Assert\NotBlank(message: 'This field is required')]
+    #[Assert\Length(
+        min: 1, max: 2000000000,
+        minMessage: 'Your name must be at least {{ limit }} characters long',
+        maxMessage: 'Your name cannot be longer than {{ limit }} characters',
+    )]
+    #[AppValidator\Author]
+    private mixed $authorId;
+
+    #[Assert\NotBlank(message: 'This field is required')]
+    #[Assert\Length(
+        min: 1, max: 2000000000,
+        minMessage: 'Your name must be at least {{ limit }} characters long',
+        maxMessage: 'Your name cannot be longer than {{ limit }} characters',
+    )]
+    #[AppValidator\Category]
+    private mixed $categoryId;
+
+    public function __construct(private readonly EntityManagerInterface $em, private readonly Request $request)
+    {
+        $apiContent = $request->getContent();
+        $content = $this->getValidJson($apiContent);
+
+        $this->title = $content['title'] ?? null;
+        $this->content = $content['content'] ?? null;
+        $this->createdAt = $content['createdAt'] ?? null;
+        $this->authorId = $content['authorId'] ?? null;
+        $this->categoryId = $content['categoryId'] ?? null;
+    }
+
+    public function supports(string $url): bool
+    {
+        $postRegex = '/\/api\/blogs\//';
+        $editRegex = '/\/api\/blogs\/\d+/';
+
+        return (bool) preg_match($postRegex, $url) || (bool) preg_match($editRegex, $url);
+    }
+
+    public function getTitle(): string
+    {
+        return $this->title;
+    }
+
+    public function getContent(): string
+    {
+        return $this->content;
+    }
+
+    /**
+     * @throws \Exception
+     */
+    public function getCreatedAt(): \DateTimeImmutable
+    {
+        return new \DateTimeImmutable($this->createdAt);
+    }
+
+    /**
+     * @throws \Exception
+     */
+    public function getBlogValueObject(): ApiBlogValueObject
+    {
+        return new ApiBlogValueObject(
+            $this->getTitle(),
+            $this->getContent(),
+            $this->getCreatedAt(),
+            $this->getAuthor($this->authorId),
+            $this->getCategory($this->categoryId)
+        );
+    }
+}
+
+
+### src/Dto/Api/Common/CategoryFiltersDto.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Dto\Api\Common;
+
+use App\Contracts\ApiFiltersInterface;
+use App\Dto\Api\Category\ApiCategoryValueObject;
+use App\Entity\Author;
+use App\Trait\ApiAuthorTrait;
+use App\Trait\ApiJsonTrait;
+use App\Validator as AppValidator;
+use Doctrine\ORM\EntityManagerInterface;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\Validator\Constraints as Assert;
+
+class CategoryFiltersDto implements ApiFiltersInterface
+{
+    use ApiJsonTrait;
+    use ApiAuthorTrait;
+
+    #[Assert\NotBlank(message: 'This field is required')]
+    #[Assert\Type('alnum')]
+    #[Assert\Length(
+        min: 3, max: 50,
+        minMessage: 'Your name must be at least {{ limit }} characters long',
+        maxMessage: 'Your name cannot be longer than {{ limit }} characters',
+    )]
+    private mixed $name;
+
+    #[Assert\NotBlank(message: 'This field is required')]
+    #[Assert\DateTime(message: 'This {{ value }} value is not a valid datetime')]
+    private mixed $createdAt;
+
+    #[Assert\NotBlank(message: 'This field is required')]
+    #[Assert\Length(
+        min: 1, max: 2000000000,
+        minMessage: 'Your name must be at least {{ limit }} characters long',
+        maxMessage: 'Your name cannot be longer than {{ limit }} characters',
+    )]
+    #[AppValidator\Author]
+    private mixed $authorId;
+
+    public function __construct(private readonly EntityManagerInterface $em, private readonly Request $request)
+    {
+        $apiContent = $request->getContent();
+        $content = $this->getValidJson($apiContent);
+
+        $this->name = $content['name'] ?? null;
+        $this->createdAt = $content['createdAt'] ?? null;
+        $this->authorId = $content['authorId'] ?? null;
+    }
+
+    public function supports(string $url): bool
+    {
+        $postRegex = '/\/api\/categories\//';
+        $editRegex = '/\/api\/categories\/\d+/';
+
+        return (bool) preg_match($postRegex, $url) || (bool) preg_match($editRegex, $url);
+    }
+
+    public function getName(): string
+    {
+        return $this->name;
+    }
+
+    /**
+     * @throws \Exception
+     */
+    public function getCreatedAt(): \DateTimeImmutable
+    {
+        return new \DateTimeImmutable($this->createdAt);
+    }
+
+    public function getAuthorEntity(): Author
+    {
+        return $this->getAuthor($this->authorId);
+    }
+
+    /**
+     * @throws \Exception
+     */
+    public function getCategoryValueObject(): ApiCategoryValueObject
+    {
+        return new ApiCategoryValueObject($this->name, $this->getCreatedAt(), $this->getAuthorEntity());
+    }
+}
+
+
+### src/Api/Dto/Common/CategoryFiltersDto.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Dto\Api\Common;
+
+use App\Contracts\ApiFiltersInterface;
+use App\Dto\Api\Comment\ApiCommentValueObject;
+use App\Trait\ApiAuthorTrait;
+use App\Trait\ApiBlogTrait;
+use App\Trait\ApiJsonTrait;
+use App\Validator as AppValidator;
+use Doctrine\ORM\EntityManagerInterface;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\Validator\Constraints as Assert;
+
+class CommentFiltersDto implements ApiFiltersInterface
+{
+    use ApiJsonTrait;
+    use ApiAuthorTrait;
+    use ApiBlogTrait;
+
+    #[Assert\NotBlank(message: 'This field is required')]
+    #[Assert\Type('string')]
+    #[Assert\Length(
+        min: 3, max: 5000,
+        minMessage: 'Your name must be at least {{ limit }} characters long',
+        maxMessage: 'Your name cannot be longer than {{ limit }} characters',
+    )]
+    private mixed $content;
+
+    #[Assert\NotBlank(message: 'This field is required')]
+    #[Assert\DateTime(message: 'This {{ value }} value is not a valid datetime')]
+    private mixed $createdAt;
+
+    #[AppValidator\Author]
+    private mixed $authorId;
+
+    #[AppValidator\Blog]
+    private mixed $blogId;
+
+    public function __construct(private readonly EntityManagerInterface $em, private readonly Request $request)
+    {
+        $apiContent = $this->request->getContent();
+        $content = $this->getValidJson($apiContent);
+
+        $this->content = $content['content'] ?? null;
+        $this->createdAt = $content['createdAt'] ?? null;
+        $this->authorId = $content['author_id'] ?? null;
+        $this->blogId = $content['blog_id'] ?? null;
+    }
+
+    public function supports(string $url): bool
+    {
+        $postRegex = '/\/api\/comments\//';
+        $editRegex = '/\/api\/comments\/\d+/';
+
+        return (bool) preg_match($postRegex, $url) || (bool) preg_match($editRegex, $url);
+    }
+
+    public function getContent(): string
+    {
+        return $this->content;
+    }
+
+    /**
+     * @throws \Exception
+     */
+    public function getCreatedAt(): \DateTimeImmutable
+    {
+        return new \DateTimeImmutable($this->createdAt);
+    }
+
+    /**
+     * @throws \Exception
+     */
+    public function getCommentValueObject(): ApiCommentValueObject
+    {
+        return new ApiCommentValueObject(
+            $this->getContent(),
+            $this->getCreatedAt(),
+            $this->getAuthor($this->authorId),
+            $this->getBlog($this->blogId)
+        );
+    }
+}
+
+
+### src/Dto/Api/Common/ApiFiltersChainOfResponsibility.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Dto\Api\Common;
+
+use App\Contracts\ApiFiltersInterface;
+use App\Exception\ApiException;
+use Doctrine\ORM\EntityManagerInterface;
+use Symfony\Component\HttpFoundation\Request;
+
+class ApiFiltersChainOfResponsibility
+{
+    private array $handlers = [];
+
+    public function add(ApiFiltersInterface $handler): self
+    {
+        $self = clone $this;
+        $self->handlers[] = $handler;
+
+        return $self;
+    }
+
+    /**
+     * @throws ApiException
+     */
+    public function getFilterObject(EntityManagerInterface $em, Request $request): ApiFiltersInterface
+    {
+        /** @var ApiFiltersInterface $handler */
+        foreach ($this->handlers as $handler) {
+            if ($handler->supports($request->getRequestUri())) {
+                return new $handler($em, $request);
+            }
+        }
+
+        throw new ApiException('No handler was able to process the filters', 500);
+    }
+}
+
+
+### src/Dto/Api/Common/ApiFiltersDto.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Dto\Api\Common;
+
+use App\Contracts\ApiFiltersInterface;
+use App\Exception\ApiException;
+use App\Trait\ApiRequestTrait;
+use Doctrine\ORM\EntityManagerInterface;
+use Psr\Log\LoggerInterface;
+use Symfony\Component\DependencyInjection\Attribute\Autowire;
+use Symfony\Component\HttpFoundation\RequestStack;
+
+class ApiFiltersDto
+{
+    use ApiRequestTrait;
+
+    private const int DEFAULT_PAGE_NUMBER = 1;
+    private int $page;
+    private string $orderField;
+    private string $orderDirection;
+
+    public function __construct(
+        private readonly EntityManagerInterface $em,
+        private readonly RequestStack $requestStack,
+        private readonly LoggerInterface $apiFiltersLogger,
+        #[Autowire(param: 'app.items_per_page')] private readonly int $itemsPerPage,
+    ) {
+        $request = $this->getRequest();
+        $this->page = $request->get('page', self::DEFAULT_PAGE_NUMBER);
+        $this->orderField = $request->get('field', 'id');
+        $this->orderDirection = $request->get('direction', 'ASC');
+    }
+
+    /**
+     * @throws ApiException
+     */
+    public function getFilters(): ApiFiltersInterface
+    {
+        $request = $this->getRequest();
+
+        $chain = (new ApiFiltersChainOfResponsibility())
+            ->add(new AuthorFiltersDto($this->em, $request))
+            ->add(new BlogFiltersDto($this->em, $request))
+            ->add(new CategoryFiltersDto($this->em, $request))
+            ->add(new CommentFiltersDto($this->em, $request));
+
+        return $chain->getFilterObject($this->em, $request);
+    }
+
+    public function getCurrentPage(): int
+    {
+        return $this->page;
+    }
+
+    public function getOrderField(): string
+    {
+        return $this->orderField;
+    }
+
+    public function getOrderDirection(): string
+    {
+        return $this->orderDirection;
+    }
+
+    public function getItemsPerPage(): int
+    {
+        return $this->itemsPerPage;
+    }
+
+    public function hasQueryStringFilters(string $resourceType): bool
+    {
+        $request = $this->getRequest();
+        if ($request->query->count()) {
+            $this->apiFiltersLogger
+                ->warning(
+                    __METHOD__ . ': ' . __LINE__ . ' can not save ' . $resourceType . ' in redis as the request contains query parameters' . print_r($request->query, true)
+                );
+
+            return true;
+        }
+
+        return false;
+    }
+}
+
+USAGE
+### src/Service/Api/Author/ApiAuthorValidatorService.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Service\Api\Author;
+
+use App\Dto\Api\Author\ApiAuthorValueObject;
+use App\Dto\Api\Common\ApiCommonDto;
+use App\Dto\Api\Common\ApiFiltersDto;
+use App\Dto\Api\Common\AuthorFiltersDto;
+use App\Exception\ApiException;
+use Symfony\Component\Validator\Validator\ValidatorInterface;
+
+class ApiAuthorValidatorService
+{
+    private array $errors;
+    private ApiAuthorValueObject $authorValueObject;
+
+    public function __construct(
+        private readonly ValidatorInterface $validator,
+        private readonly ApiFiltersDto $apiFiltersDto,
+    ) {
+    }
+
+    /**
+     * @throws ApiException
+     */
+    public function validate(): bool
+    {
+        /** @var AuthorFiltersDto $dto */
+        $dto = $this->apiFiltersDto->getFilters();
+        $errors = $this->validator->validate($dto);
+
+        if (count($errors) > 0) {
+            $this->errors = (new ApiCommonDto())->getFormattedErrors($errors);
+
+            return false;
+        }
+
+        if (!$dto instanceof AuthorFiltersDto) {
+            throw new ApiException('There is no functionality to process the author', 500);
+        }
+
+        $this->authorValueObject = $dto->getAuthorValueObject();
+
+        return true;
+    }
+
+    public function getErrors(): array
+    {
+        return $this->errors ?? [];
+    }
+
+    public function getAuthorValueObject(): ApiAuthorValueObject
+    {
+        return $this->authorValueObject;
+    }
+}
+
+
+### src/Service/Api/Author/ApiAuthorService.php
+class ApiAuthorService
+{
+    use ApiAuthorTrait;
+
+    public function __construct(
+        private EntityManagerInterface $em,
+        private RedisService $redisService,
+        private ApiAuthorValidatorService $apiAuthorValidatorService,
+        private AuthorRedisService $authorRedisService,
+        private AuthorCreateProducer $authorCreateProducer,
+    ) {
+    }
+
+    public function saveAuthor(): Author
+    {
+        $this->validateAuthorIncomingRequest();
+        $author = $this->createAuthor();
+        $this->em->persist($author);
+        $this->em->flush();
+        $this->authorRedisService->save($author);
+
+        $serializer = SerializerBuilder::create()->build();
+        $this->authorCreateProducer->publish($serializer->serialize($author, 'json'));
+
+        return $author;
+    }
+
+    /**
+     * @throws ApiException
+     * @throws \JsonException
+     */
+    private function validateAuthorIncomingRequest(): void
+    {
+        if (!$this->apiAuthorValidatorService->validate()) {
+            foreach ($this->apiAuthorValidatorService->getErrors() as $field => $errorMessage) {
+                $errorMessages[] = json_encode($field . ' - ' . $errorMessage, JSON_THROW_ON_ERROR);
+            }
+
+            throw new ApiException(implode(', ', $errorMessages ?? []), 400);
+        }
+    }
+
+    private function createAuthor(): Author
+    {
+        $authorValueObject = $this->apiAuthorValidatorService->getAuthorValueObject();
+
+        return (new Author())
+            ->setName($authorValueObject->getName())
+            ->setEmail($authorValueObject->getEmail())
+            ->setCreatedAt($authorValueObject->getCreatedAt())
+            ->setUser($authorValueObject->getUser());
+    }
+}
+========================================================================================================================
+========================================================================================================================
+8. EventSubscriber
+
+### controller
+#[Route(path: '/test', name: 'test', methods: ['GET'])]
+public function test(
+    EventDispatcherInterface $dispatcher,
+    LoggerInterface $polavisLogger,
+    PolavisCreateProducer $polavisCreateProducer,
+    SerializerInterface $serializer
+): JsonResponse
+{
+    $author = (new Author())
+        ->setName('the author name')
+        ->setEmail('author-email@polavis-app.local')
+        ->setCreatedAt(new \DateTimeImmutable());
+    $authorCreatedEvent = new AuthorCreatedEvent($author);
+    $dispatcher->addSubscriber(new AuthorEventSubscriber($serializer, $polavisLogger, $polavisCreateProducer));
+    $dispatcher->dispatch($authorCreatedEvent, AuthorCreatedEvent::NAME);
+
+    return new JsonResponse('just testing', 200);
+}
+
+
+### AuthorCreateEvent.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Event;
+
+use App\Entity\Author;
+use Symfony\Contracts\EventDispatcher\Event;
+
+class AuthorCreatedEvent extends Event
+{
+    public const string NAME = 'author.created';
+
+    public function __construct(private Author $author)
+    {
+    }
+
+    public function getAuthor(): Author
+    {
+        return $this->author;
+    }
+}
+
+
+### AuthorEventSubscriber.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\EventSubscriber;
+
+use App\Event\AuthorCreatedEvent;
+use App\Producer\PolavisCreateProducer;
+use Psr\Log\LoggerInterface;
+use Symfony\Component\EventDispatcher\EventSubscriberInterface;
+use Symfony\Component\Serializer\SerializerInterface;
+
+readonly class AuthorEventSubscriber implements EventSubscriberInterface
+{
+    public function __construct(
+        private SerializerInterface $serializer,
+        private LoggerInterface $authorLogger,
+        private PolavisCreateProducer $polavisCreateProducer,
+    ) {
+    }
+
+    public static function getSubscribedEvents(): array
+    {
+        return [
+            AuthorCreatedEvent::NAME => 'onAuthorCreated'
+        ];
+    }
+
+    public function onAuthorCreated(AuthorCreatedEvent $event): void
+    {
+        $author = $this->serializer->serialize($event->getAuthor(), 'json');
+        $this->polavisCreateProducer->publish($author);
+        $this->authorLogger->info('This is the AuthorCreatedEvent: ' . json_encode($event));
+    }
+}
+
+
+when /test is accessed in the web browser, a new message will be published on a rabbitmq exchange
+========================================================================================================================
+========================================================================================================================
+7. Register-login in web
+docs: https://symfony.com/doc/current/doctrine/registration_form.html
+
+1) make:user
+2) make:registration-form    [comment-out block javascripts from base.html.twig]
+3) make:security:form-login
+4) make:form                 ProfileController to change the password
+
+1) make:user
+$ docker exec -it polavis2-php-container bash
+# php bin/console make:user
+-The name of the security user class (e.g. User) [User]: <enter>
+-Do you want to store user data in the database (via Doctrine)? (yes/no) [yes]: <enter>
+-Enter a property name that will be the unique "display" name for the user (e.g. email, username, uuid) [email]: <enter>
+-Does this app need to hash/check user passwords? (yes/no) [yes]: <enter>
+ created: src/Entity/User.php
+ created: src/Repository/UserRepository.php
+ updated: src/Entity/User.php
+ updated: config/packages/security.yaml
+
+### config/packages/security.yaml
+security:
+    #...
+    providers:
+        app_user_provider:
+            entity:
+                class: App\Entity\User
+                property: email
+    firewalls:
+        #...
+        main:
+            #...
+            provider: app_user_provider
+
+# php bin/console make:migration
+
+# php bin/console doctrine:migrations:migrate
+
+
+2) make:registration-form    [comment-out block javascripts from base.html.twig]
+OBS create an AppController with a app_home route to use to redirect after registration (in RegistrationController)
+
+Creating a registration form for App\Entity\User
+-Do you want to add a #[UniqueEntity] validation attribute to your User class to make sure duplicate accounts aren't created? (yes/no) [yes]: <enter>
+-Do you want to send an email to verify the user's email address after registration? (yes/no) [yes]: no
+-Do you want to automatically authenticate the user after registration? (yes/no) [yes]: <enter>
+! [NOTE] No Guard authenticators found - so your user won't be automatically authenticated after registering.
+-What route should the user be redirected to after registration?: [14] home
+ updated: src/Entity/User.php
+ created: src/Form/RegistrationFormType.php
+ created: src/Controller/RegistrationController.php
+ created: templates/registration/register.html.twig
+Next:
+ Make any changes you need to the form, controller & template.
+ Then open your browser, go to "/register" and enjoy your new form!
+
+
+
+3) make:security:form-login
+-Choose a name for the controller class (e.g. SecurityController) [SecurityController]: <enter>
+-Do you want to generate a '/logout' URL? (yes/no) [yes]: <enter>
+ created: src/Controller/SecurityController.php
+ created: templates/security/login.html.twig
+ updated: config/packages/security.yaml
+
+### config/packages/security.yaml
+security:
+    #...
+    firewalls:
+        #...
+        main:
+            provider: ...
+            form_login:
+                login_path: app_login
+                check_path: app_login
+                enable_csrf: true
+            logout:
+                path: app_logout
+                target: app_home # where to redirect after logout
+
+========================================================================================================================
+========================================================================================================================
+6. Custom validator
+### src/Validator/User.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Validator;
+
+use Symfony\Component\Validator\Constraint;
+
+#[\Attribute]
+class User extends Constraint
+{
+    public string $message = 'This {{ int }}  must be a valid User in our system';
+}
+
+### src/Validator/UserValidator.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Validator;
+
+use App\Entity\User as UserEntity;
+use App\Trait\UserTrait;
+use Doctrine\ORM\EntityManagerInterface;
+use Psr\Log\LoggerInterface;
+use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
+use Symfony\Component\Validator\Constraint;
+use Symfony\Component\Validator\ConstraintValidator;
+use Symfony\Component\Validator\Exception\UnexpectedTypeException;
+use Symfony\Component\Validator\Exception\UnexpectedValueException;
+
+class UserValidator extends ConstraintValidator
+{
+    use UserTrait;
+
+    public function __construct(private EntityManagerInterface $em, private LoggerInterface $polavisLogger)
+    {
+    }
+
+    public function validate(mixed $value, Constraint $constraint): void
+    {
+        if (!$constraint instanceof User) {
+            $this->polavisLogger->error(__METHOD__ . ': Provided constraint must be of type ' . User::class);
+            throw new UnexpectedTypeException($constraint, User::class);
+        }
+
+        if (null === $value || '' === $value) {
+            $this->polavisLogger->warning(__METHOD__ . ': Provided value is null or empty');
+            return;
+        }
+
+        if (!is_int($value)) {
+            $this->polavisLogger->error(__METHOD__ . ': Provided value is not an int');
+            throw new UnexpectedValueException($value, 'int');
+        }
+
+        try {
+            $user = $this->getUser($value);
+        } catch (\InvalidArgumentException $exception) {
+            $this->polavisLogger->error(__METHOD__ . ': ' . $exception->getMessage());
+            throw new UnexpectedValueException($value, 'positive');
+        } catch (NotFoundHttpException $exception) {
+            $this->polavisLogger->error(__METHOD__ . ': ' . $exception->getMessage());
+            throw new UnexpectedValueException($value, 'User');
+        }
+
+        if ($user instanceof UserEntity) {
+            return;
+        }
+
+        $this->context->buildViolation($constraint->message)
+            ->setParameter('{{ int }}', (string) $value)
+            ->addViolation();
+    }
+}
+
+
+USAGE:
+### src/Dto/Api/Author/Post/ApiPostDto.php
+use App\Validator as AppValidator;
+use Symfony\Component\Validator\Constraints as Assert;
+class ApiPostDto
+{
+    #[Assert\NotBlank(message: 'This field is required')]
+    #[Assert\Length(
+        min: 1, max: 2000000000,
+        minMessage: 'Your name must be at least {{ limit }} characters long',
+        maxMessage: 'Your name cannot be longer than {{ limit }} characters',
+    )]
+    #[AppValidator\User]
+    private mixed $userId;
+
+    public function __construct(private string $apiContent, private EntityManagerInterface $em) {
+        $content = $this->getValidJson($apiContent); //this is a trait which validates the json and returns json_decode($apiContent)
+        $this->userId = $content['userId'] ?? null;
+    }
+    public function getUserEntity(): User
+    {
+        return $this->getUser($this->userId); //this getUser is a trait that gets the user from redis or db
+    }
+}
+
+========================================================================================================================
+========================================================================================================================
+5. Custom API token authentication (Bearer token)
+
+### Existing User.php class from point 7. Register-login
+### src/Entity/User.php
+<?php
+
+namespace App\Entity;
+
+use Doctrine\Common\Collections\ArrayCollection;
+use Doctrine\Common\Collections\Collection;
+use Doctrine\ORM\Mapping as ORM;
+use Symfony\Component\Security\Core\User\PasswordAuthenticatedUserInterface;
+use Symfony\Component\Security\Core\User\UserInterface;
+use Symfony\Component\Validator\Constraints as Assert;
+
+class User implements UserInterface, PasswordAuthenticatedUserInterface
+{
+    //...
+
+    #[ORM\OneToOne(mappedBy: 'user', cascade: ['persist', 'remove'])]
+    private ?Author $author = null;
+
+    #[ORM\OneToMany(mappedBy: 'user', targetEntity: ApiToken::class, cascade: ['persist', 'remove'])]
+    private Collection $apiTokens;
+
+    public function __construct()
+    {
+        $this->apiTokens = new ArrayCollection();
+    }
+
+    public function getUserIdentifier(): string
+    {
+        return (string) $this->email;
+    }
+
+    public function getAuthor(): ?Author
+    {
+        return $this->author;
+    }
+
+    public function setAuthor(Author $author): self
+    {
+        // set the owning side of the relation if necessary
+        if ($author->getUser() !== $this) {
+            $author->setUser($this);
+        }
+
+        $this->author = $author;
+
+        return $this;
+    }
+
+    public function getApiTokens(): Collection
+    {
+        return $this->apiTokens;
+    }
+
+    public function addApiToken(ApiToken $apiToken): self
+    {
+        if (!$this->apiTokens->contains($apiToken)) {
+            $this->apiTokens->add($apiToken);
+            $apiToken->setUser($this);
+        }
+
+        return $this;
+    }
+
+    public function removeApiToken(ApiToken $apiToken): self
+    {
+        if ($this->apiTokens->removeElement($apiToken)) {
+            // set the owning side to null (unless already changed)
+            if ($apiToken->getUser() === $this) {
+                $apiToken->setUser(null);
+            }
+        }
+
+        return $this;
+    }
+}
+
+
+
+### src/Entity/ApiToken.php
+<?php
+
+namespace App\Entity;
+
+use App\Repository\ApiTokenRepository;
+use Doctrine\DBAL\Types\Types;
+use Doctrine\ORM\Mapping as ORM;
+
+#[ORM\Entity(repositoryClass: ApiTokenRepository::class)]
+#[ORM\Table(name: 'api_tokens')]
+class ApiToken
+{
+    #[ORM\Id]
+    #[ORM\GeneratedValue]
+    #[ORM\Column]
+    private ?int $id = null;
+
+    #[ORM\Column(length: 255)]
+    private ?string $token = null;
+
+    #[ORM\Column(type: Types::DATETIME_IMMUTABLE)]
+    private ?\DateTimeImmutable $expiresAt = null;
+
+    #[ORM\ManyToOne(inversedBy: 'apiTokens')]
+    #[ORM\JoinColumn(nullable: false)]
+    private ?User $user = null;
+
+    public function __construct(User $user)
+    {
+        $this->user = $user;
+        $this->expiresAt = (new \DateTimeImmutable())->modify('+1 month');
+    }
+
+    public function getId(): ?int
+    {
+        return $this->id;
+    }
+
+    public function getToken(): ?string
+    {
+        return $this->token;
+    }
+
+    /**
+     * @throws \Exception
+     */
+    public function setToken(): self
+    {
+        $this->token = bin2hex(random_bytes(14 * 9));
+
+        return $this;
+    }
+
+    public function getExpiresAt(): ?\DateTimeImmutable
+    {
+        return $this->expiresAt;
+    }
+
+    public function getUser(): ?User
+    {
+        return $this->user;
+    }
+
+    public function setUser(?User $user): self
+    {
+        $this->user = $user;
+
+        return $this;
+    }
+}
+
+
+
+### config/packages/security.yaml
+security:
+    #...
+    firewalls:
+        #...
+        api:
+            pattern: ^/api/
+            custom_authenticator:
+                - App\Security\ApiTokenAuthenticator
+            access_denied_handler: App\Security\ApiTokenAccessDeniedHandler
+
+
+
+### src/Security/ApiTokenAuthenticator.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Security;
+
+use App\Repository\ApiTokenRepository;
+use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\Security\Core\Authentication\Token\TokenInterface;
+use Symfony\Component\Security\Core\Exception\AuthenticationException;
+use Symfony\Component\Security\Core\Exception\CustomUserMessageAuthenticationException;
+use Symfony\Component\Security\Http\Authenticator\AbstractAuthenticator;
+use Symfony\Component\Security\Http\Authenticator\Passport\Badge\UserBadge;
+use Symfony\Component\Security\Http\Authenticator\Passport\Passport;
+use Symfony\Component\Security\Http\Authenticator\Passport\SelfValidatingPassport;
+
+class ApiTokenAuthenticator extends AbstractAuthenticator
+{
+    public function __construct(private ApiTokenRepository $apiTokenRepository)
+    {
+    }
+
+    public function supports(Request $request): ?bool
+    {
+        # this authenticator will be skipped if supports() returns null/false
+        # todo X-AUTH-TOKEN
+        $has = $request->headers->has('Authorization')
+            && str_starts_with($request->headers->get('Authorization'), 'Bearer ');
+        if (!$has) {
+            throw new AccessDeniedException('Access denied. Please authentificate!');
+        }
+
+        return true;
+    }
+
+    /**
+     * @throws CustomUserMessageAuthenticationException
+     */
+    public function authenticate(Request $request): Passport
+    {
+        $authorizationHeader = $request->headers->get('Authorization');
+        $tokenFromRequest = substr($authorizationHeader, 7);
+        $token = $this->apiTokenRepository->findOneBy([
+            'token' => $tokenFromRequest
+        ]);
+        if (!$token || !$token->getUser()) {
+            throw new CustomUserMessageAuthenticationException(
+                'No or wrong API token provided',
+                code: Response::HTTP_UNAUTHORIZED
+            );
+        }
+        $now = new \DateTimeImmutable();
+        $tokenExpiresAt = $token->getExpiresAt();
+        if ($tokenExpiresAt < $now) {
+            throw new CustomUserMessageAuthenticationException(
+                'Your api token expired',
+                code: Response::HTTP_FORBIDDEN
+            );
+        }
+
+        $userIdentifier = $token->getUser()?->getUserIdentifier();
+        $userBadge = new UserBadge($userIdentifier);
+
+        return new SelfValidatingPassport($userBadge);
+    }
+
+    public function onAuthenticationSuccess(Request $request, TokenInterface $token, string $firewallName): ?Response
+    {
+        return null;
+    }
+
+    public function onAuthenticationFailure(Request $request, AuthenticationException $exception): ?Response
+    {
+        return new JsonResponse($exception->getMessage(), $exception->getCode());
+    }
+}
+
+
+### src/Security/ApiTokenAccessDeniedHandler.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Security;
+
+use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\Security\Core\Exception\AccessDeniedException;
+use Symfony\Component\Security\Http\Authorization\AccessDeniedHandlerInterface;
+
+class ApiTokenAccessDeniedHandler implements AccessDeniedHandlerInterface
+{
+
+    public function handle(Request $request, AccessDeniedException $accessDeniedException): ?Response
+    {
+        return new JsonResponse($accessDeniedException->getMessage(), $accessDeniedException->getCode());
+    }
+}
+
+
+
+### Request through Postman:
+PATCH http://127.0.0.1:18551/api/blogs/102
+Authorization Type Bearer aaaINSERT HERE TOKEN FROM DBbbb
+Body raw:
+{
+    "title": "News",
+    "content": "Top news for today",
+    "createdAt": "2024-04-20 14:29:17",
+    "authorId": 121,
+    "categoryId": 30
+}
+
+### Request through Postman with no or invalid Authorization Type Bearer
+"No or wrong API token provided"
+
+
+========================================================================================================================
+========================================================================================================================
+4. Voters
+https://symfony.com/doc/current/security/voters.html#creating-the-custom-voter
+
+### config/packages/security.yaml
+security:
+    access_decision_manager:
+        strategy: affirmative #priority, consensus, unanimous
+        allow_if_all_abstain: false
+        allow_if_equal_granted_denied: false
+OBS affirmative: grants access as soon as there is one voter granting access
+OBS consensus:   grants access if there are more voters granting access than voters denying access
+OBS unanimous:   grants access if there is no voter denying access
+OBS priority:    grants/denies access by the first voter that doesn't abstain based on his service priority
+
+### src/Service/Api/Blog/ApiBlogService.php
+use Symfony\Component\Security\Core\Authorization\AuthorizationCheckerInterface;
+class ApiBlogService {
+    public function __construct(private AuthorizationCheckerInterface $authorizationChecker) {}
+    public function getCachedPartialEditedBlog(mixed $id): Blog
+    {
+        $blog = $this->getCachedBlog((int) $id); //coming from a trait which will perform db query to get blog object
+        if (!$this->authorizationChecker->isGranted('blog.author', $blog)) {
+            throw new AccessDeniedHttpException('Access denied');
+        }
+    }
+}
+
+### src/Voter/BlogAuthorVoter.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Voter;
+
+use App\Entity\Blog;
+use App\Entity\User;
+use Symfony\Component\Security\Core\Authentication\Token\TokenInterface;
+use Symfony\Component\Security\Core\Authorization\Voter\CacheableVoterInterface;
+
+class BlogAuthorVoter implements CacheableVoterInterface
+{
+    private const BLOG_AUTHOR = 'blog.author';
+
+    public function supportsAttribute(string $attribute): bool
+    {
+        return self::BLOG_AUTHOR === $attribute;
+    }
+
+    public function supportsType(string $subjectType): bool
+    {
+        return $subjectType === Blog::class;
+    }
+
+    public function vote(TokenInterface $token, mixed $subject, array $attributes): int
+    {
+        $user = $token->getUser();
+        if (!$user instanceof User) {
+            return CacheableVoterInterface::ACCESS_DENIED; // -1
+        }
+
+        assert($subject instanceof Blog);
+
+        # the request to the api provides a BEARER token
+        # this token from db.api_tokens corresponds to a db.users (api_tokens.user_id)
+        # db.authors has user_id (1-1 relation)
+        # POST /blogs { "title": "title one", "authorId": 121}
+        # blogs:       id=102 author_id=121
+        # api_tokens:  id=1   token=abc  user_id=6
+        # users:       id=6
+        # authors:     id=121 user_id=6
+        # PATCH /blogs/102 { "title": "changed title" } Authorization Bearer abc
+        # 200 OK
+        # PUT /blogs/102 { "title": "new title", "authorId": 121 } Authorization Bearer abc
+        # 200 OK
+        if ($user->getAuthor()->getId() === $subject->getAuthor()->getId()) {
+            return CacheableVoterInterface::ACCESS_GRANTED; // 1
+        }
+
+        return CacheableVoterInterface::ACCESS_DENIED; // -1
+    }
+}
+
+========================================================================================================================
+========================================================================================================================
+3. symfony messenger
+
+install:
+
+a)
+### docker/php/Dockerfile
+RUN apt-get update ...
+#...
+RUN pear update-channels && pecl update-channels
+RUN pecl install redis && docker-php-ext-enable redis
+#...
+
+b)
+$ docker compose -f docker/docker-compose.yaml up -d --build
+
+c)
+docker exec -it polavis-php-container composer require symfony/messenger
+docker exec -it polavis-php-container composer require symfony/amqp-messenger
+docker exec -it polavis-php-container composer require symfony/redis-messenger    ## for redis async transport
+
+d)
+### config/packages/messenger.yaml
+framework:
+    messenger:
+        failure_transport: failed
+        transports:
+            async: '%env(MESSENGER_TRANSPORT_DSN)%'
+            failed: 'doctrine://default?queue_name=failed'
+
+        routing:
+            #...
+            'App\Messenger\PolavisId': async
+
+e)
+### .env
+###> symfony/messenger ###
+# Choose one of the transports below
+# MESSENGER_TRANSPORT_DSN=amqp://guest:guest@polavis-rabbitmq-container:5672/%2f/messages
+MESSENGER_TRANSPORT_DSN=redis://polavis-redis-container:6379/messages
+# MESSENGER_TRANSPORT_DSN=doctrine://default?auto_setup=0
+###< symfony/messenger ###
+
+example: update an entity in db using messenger, after 5 seconds:
+
+### App\Messenger\PolavisId.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Messenger;
+
+class PolavisId
+{
+    public function __construct(private int $id)
+    {}
+
+    public function getId(): int
+    {
+        return $this->id;
+    }
+}
+
+### App\Messenger\PolavisIdHandler.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Messenger;
+
+use App\Entity\User;
+use Doctrine\ORM\EntityManagerInterface;
+use Symfony\Component\Messenger\Attribute\AsMessageHandler;
+
+#[AsMessageHandler]
+class PolavisIdHandler
+{
+    public function __construct(private EntityManagerInterface $entityManager)
+    {}
+
+    public function __invoke(PolavisId $polavisId): void
+    {
+        $user = $this->entityManager->find(User::class, $polavisId->getId());
+        $user->setName('name-testing');
+        $this->entityManager->flush();
+    }
+}
+
+### App\Controller\MessengerController.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Controller;
+
+use App\Messenger\PolavisId;
+use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpKernel\Attribute\AsController;
+use Symfony\Component\Messenger\MessageBusInterface;
+use Symfony\Component\Messenger\Stamp\DelayStamp;
+use Symfony\Component\Routing\Attribute\Route;
+
+#[AsController]
+class MessengerController
+{
+    private const int FIVE_SECONDS_IN_MS = 5000;
+
+    #[Route(path: '/async-messenger', name: 'async_messenger', methods: ['GET'])]
+    public function __invoke(MessageBusInterface $bus): JsonResponse
+    {
+        $bus->dispatch(new PolavisId(1), [new DelayStamp(self::FIVE_SECONDS_IN_MS)]);
+
+        return new JsonResponse(__METHOD__, Response::HTTP_OK);
+    }
+}
+
+
+
+access 127.0.0.1:18551/async-messenger ### this will dispatch the message
+
+$ docker exec -it polavis-php-container php bin/console messenger:consume async -vv
+$ docker exec polavis-php-container php bin/console messenger:consume async -vv
+
+
+
+
+========================================================================================================================
+2. redis: docker exec polavis-redis-container redis-cli FLUSHALL
+### docker/docker-compose.yaml
+services:
+    #...
+    redis-service:
+        image: library/redis:alpine
+        container_name: polavis-redis-container
+        tty: true
+        networks:
+            - polavis-network
+
+### $ docker compose -f docker/docker-compose.yaml up -d
+
+### .env
+REDIS_URL=redis://polavis-redis-container:6379
+
+### config/packages/cache.yaml
+framework:
+    cache:
+        pools:
+            #my.dedicated.cache: null
+            redis.cache:
+                adapter: cache.adapter.redis
+                provider: '%env(REDIS_URL)%'
+                default_lifetime: 86400
+                tags: true
+
+### src/Service/RedisService.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Service;
+
+use Psr\Cache\CacheItemInterface;
+use Psr\Cache\CacheItemPoolInterface;
+use Psr\Log\LoggerInterface;
+use Symfony\Component\Cache\CacheItem;
+
+readonly class RedisService
+{
+    public const ONE_MINUTE_IN_SECONDS = 60;
+    public const ONE_HOUR_IN_SECONDS = 60 * 60; #3600
+    public const ONE_DAY_IN_SECONDS = 24 * 60 * 60; #86400
+    public const ONE_YEAR_IN_SECONDS = 365 * 24 * 60 * 60;
+
+    public function __construct(
+        private CacheItemPoolInterface $redisCache,
+        private LoggerInterface $redisLogger
+    ) {
+    }
+
+    public function save(string $key, mixed $value, int $lifetime = self::ONE_MINUTE_IN_SECONDS): bool
+    {
+        try {
+            /** @var CacheItem $cacheItem */
+            $cacheItem = $this->redisCache->getItem($key);
+        } catch (\Exception $exception) {
+            $this->redisLogger->error(__METHOD__.': '.$exception->getMessage());
+
+            return false;
+        }
+
+        $cacheItem->set($value);
+        $cacheItem->expiresAfter($lifetime);
+        $this->redisLogger->info(__METHOD__.': saved in key = '.$key.', value = '.print_r($value, true).', with lifetime = '.$lifetime);
+
+        return $this->redisCache->save($cacheItem);
+    }
+
+    public function read(string $key): ?CacheItemInterface
+    {
+        try {
+            /** @var CacheItem $cacheItem */
+            $cacheItem = $this->redisCache->getItem($key);
+        } catch (\Exception $exception) {
+            $this->redisLogger->error(__METHOD__.': '.$exception->getMessage());
+
+            return null;
+        }
+
+        if ($cacheItem->isHit()) {
+            $this->redisLogger->info(
+                __METHOD__.': success to read from redis. key = '.$key.', value = '.print_r($cacheItem->get(), true)
+            );
+        }
+
+        if (!$cacheItem->isHit()) {
+            $this->redisLogger->warning(
+                __METHOD__.': failed to read from redis. key = '.$key.', value = '.print_r($cacheItem->get(), true)
+            );
+        }
+
+        return $cacheItem->isHit() ? $cacheItem : null;
+    }
+
+    public function delete(string $key): bool
+    {
+        try {
+            return $this->redisCache->deleteItem($key);
+        } catch (\Exception $exception) {
+            $this->redisLogger->error(__METHOD__.': '.$exception->getMessage());
+
+            return false;
+        }
+    }
+}
+
+### src/Service/Api/Get/ApiGetRedisAuthorService.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Service\Api\Get;
+
+use App\Service\RedisService;
+use App\Trait\ApiRequestTrait;
+use Psr\Log\LoggerInterface;
+use Symfony\Component\HttpFoundation\RequestStack;
+
+readonly class ApiGetRedisAuthorService
+{
+    use ApiRequestTrait;
+
+    public function __construct(
+        private ApiGetAuthorService $apiGetAuthorService,
+        private RedisService $redisService,
+        private LoggerInterface $redisLogger,
+        private RequestStack $requestStack,
+    ) {
+    }
+
+    public function getAuthors(): array
+    {
+        $request = $this->getRequest();
+        if (!empty($request->query)) {
+            $this->redisLogger
+                ->info(__METHOD__ . ':' . __LINE__ . ' can not save authors as the request contains query parameters');
+
+            return $authors = $this->apiGetAuthorService->formatAuthors();
+        }
+
+        $cached = $this->redisService->read('getAuthors');
+        if (null !== $cached) {
+            $this->redisLogger
+                ->info(__METHOD__ . ':' . __LINE__ . ' found getAuthors key in redis: ' . print_r($cached->get(), true));
+
+            return json_decode($cached->get(), true);
+        }
+        $this->redisLogger->info(__METHOD__ . ':' . __LINE__ . ' getAuthors key does not exists in redis');
+        $authors = $this->apiGetAuthorService->formatAuthors();
+        $this->redisService
+            ->save('getAuthors', json_encode($authors), RedisService::ONE_YEAR_IN_SECONDS);
+
+        return $authors;
+    }
+}
+
+
+### src/Trait/ApiRequestTrait.php
+<?php
+
+namespace App\Trait;
+
+use Symfony\Component\HttpFoundation\Request;
+
+trait ApiRequestTrait
+{
+    public function getRequest(): Request
+    {
+        if (!isset($this->requestStack)) {
+            throw new \RuntimeException('Setup a valid request (RequestStack does not exists)', 500);
+        }
+
+        $request = $this->requestStack->getCurrentRequest();
+        if (null === $request) {
+            throw new \RuntimeException('Request is missing', 500);
+        }
+
+        return $request;
+    }
+}
+
+### src/Controller/Api/ApiAuthorController.php
+#[Route(path: '/', name: 'get_paginated', methods: ['GET'])]
+public function getAuthors(ApiGetRedisAuthorService $apiGetRedisAuthorService): JsonResponse
+{
+    try {
+        $cachedAuthors = $apiGetRedisAuthorService->getAuthors();
+    } catch (\Exception $exception) {
+        return new JsonResponse($exception->getMessage(), $exception->getCode());
+    }
+
+    return new JsonResponse($cachedAuthors, 200);
+}
+
+
+========================================================================================================================
+1. RabbitMQ:
+
+PAY ATTENTION: added it in polavis and polavis2 projects!
+HERE IT'S ONLY WRITTEN FOR polavis. FOR polavis2 IT'S THE SAME !!
+
+### polavis/docker/php/Dockerfile
+RUN apt-get update ...
+    && docker-php-ext-install \
+    ...
+    pcntl \
+    sockets
+
+### $ docker compose -f docker/docker-compose.yaml down
+### $ docker compose -f docker/docker-compose.yaml up -d --build
+### $ docker exec -it polavis-php-container bash
+### # php -i | grep pcntl     -- OK
+### # php -i | grep sockets   -- OK
+### # composer require php-amqplib/rabbitmq-bundle
+
+### polavis/docker/docker-compose.yaml
+services:
+    polavis-rabbitmq-service:
+        image: rabbitmq:3-management-alpine
+        container_name: polavis-rabbitmq-container
+        ports: [ '15671:5672', '15672:15672' ]
+        volumes:
+            - ./docker-conf/rabbitmq/data/:/var/lib/rabbitmq/mnesia
+            - ./docker-conf/rabbitmq/log/:/var/log/rabbitmq
+        networks:
+            - polavis-network
+
+### $ docker compose -f docker/docker-compose.yaml up -d
+to create both projects rabbitmq-containers
+
+### polavis2 project
+### config/packages/old_sound_rabbit_mq.yaml
+old_sound_rabbit_mq:
+    connections:
+        polavis: '%env(RABBITMQ_POLAVIS_URL)%'
+    producers:
+        polavis:
+            connection: polavis
+            exchange_options: { name: 'polavis-exchange', type: direct }
+            class: App\Producer\PolavisProducer
+
+### polavis2 project
+### .env
+###> php-amqplib/rabbitmq-bundle ###
+RABBITMQ_URL=amqp://guest:guest@polavis2-rabbitmq-container:5672
+RABBITMQ_POLAVIS_URL=amqp://guest:guest@polavis-rabbitmq-container:5672
+###< php-amqplib/rabbitmq-bundle ###
+
+### polavis2 project
+### src/Producer/PolavisProducer.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Producer;
+
+use OldSound\RabbitMqBundle\RabbitMq\Producer;
+
+class PolavisProducer extends Producer
+{
+}
+
+### polavis2 project
+### src/Controller/ApiController.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Controller;
+
+use App\Producer\PolavisProducer;
+use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
+use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\Routing\Attribute\Route;
+
+class ApiController extends AbstractController
+{
+    #[Route(path: '/', name: 'home', methods: ['GET'])]
+    public function index(PolavisProducer $polavisProducer): JsonResponse
+    {
+        return new JsonResponse(__METHOD__, 200);
+    }
+}
+
+### NOW IF I ACCESS polavis2 in browser: 127.0.0.1:18553/
+AN ERROR WILL BE THROWN:
+stream_socket_client(): Unable to connect to tcp://polavis-rabbitmq-container:5672 (php_network_getaddresses: getaddrinfo for polavis-rabbitmq-container failed: Name or service not known)
+
+### FIX
+### $ docker network create -d bridge polavis-app-network
+
+### polavis/docker/docker-compose.yaml
+services:
+    polavis-nginx-service:
+        #...
+        networks:
+            #...
+            - polavis-app-network
+    polavis-php-service:
+        #...
+        networks:
+            #...
+            - polavis-app-network
+    polavis-rabbitmq-service:
+        #...
+        networks:
+            #...
+            - polavis-app-network
+networks:
+    #...
+    polavis-app-network:
+        driver: bridge
+        external: true
+
+
+### polavis2/docker/docker-compose.yaml
+services:
+    polavis2-nginx-service:
+        #...
+        networks:
+            #...
+            - polavis-app-network
+    polavis2-php-service:
+        #...
+        networks:
+            #...
+            - polavis-app-network
+    polavis2-rabbitmq-service:
+        #...
+        networks:
+            #...
+            - polavis-app-network
+networks:
+    #...
+    polavis-app-network:
+        driver: bridge
+        external: true
+
+### $ docker compose -f docker/docker-compose.yaml up -d
+to recreate both projects rabbitmq-containers
+
+### NOW ACCESS polavis2 IN BROWSER: 127.0.0.1:18553/
+
+### polavis2 project
+### src/Controller/ApiController.php
+#[Route(path: '/', name: 'home', methods: ['GET'])]
+public function index(PolavisProducer $polavisProducer): JsonResponse
+{
+    $messageToPolavis = [
+        'name' => 'the-person-name',
+        'email' => 'person@api-content.com',
+    ];
+    $polavisProducer->publish(json_encode($messageToPolavis));
+    return new JsonResponse(__METHOD__, 200);
+}
+
+### IN ORDER TO PUBLISH THE MESSAGE, ACCESS polavis2 IN BROWSER
+127.0.0.1:18553/
+
+### TO CHECK THE PUBLISHED MESSAGE:
+http://127.0.0.1:15674/#/exchanges/%2F/polavis2-exchange
+
+### TO CONSUME THE MESSAGE:
+### polavis project
+### .env
+###> php-amqplib/rabbitmq-bundle ###
+RABBITMQ_URL=amqp://guest:guest@polavis-rabbitmq-container:5672
+RABBITMQ_POLAVIS2_URL=amqp://guest:guest@polavis2-rabbitmq-container:5672
+###< php-amqplib/rabbitmq-bundle ###
+
+### polavis project
+### config/packages/old_sound_rabbit_mq.yaml
+old_sound_rabbit_mq:
+    connections:
+        #...
+        polavis2:
+            url: '%env(RABBITMQ_POLAVIS2_URL)%'
+    consumers:
+        polavis2:
+            connection: polavis2
+            exchange_options: { name: 'polavis2-exchange', type: direct }
+            queue_options: { name: 'polavis2-queue' }
+            callback: App\Consumer\Polavis2Consumer
+
+
+### polavis project
+### src/Consumer/Polavis2Consumer.php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Consumer;
+
+use OldSound\RabbitMqBundle\RabbitMq\ConsumerInterface;
+use PhpAmqpLib\Message\AMQPMessage;
+use Psr\Log\LoggerInterface;
+
+class Polavis2Consumer implements ConsumerInterface
+{
+    public function __construct(private LoggerInterface $apiLogger)
+    {
+    }
+
+    public function execute(AMQPMessage $msg): void
+    {
+        $this->apiLogger->info($msg->body);
+    }
+}
+
+### polavis project
+### TO CONSUME:
+### docker exec -it polavis-php-container bash
+### php bin/console rabbitmq:consumer polavis2 -vvv
+
