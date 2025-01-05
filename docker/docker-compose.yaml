@@ -1,4 +1,4 @@
-version: '3'
+#version: '3'
 volumes:
     mysql_data:
 services:
@@ -89,6 +89,17 @@ services:
             interval: 4s
             timeout: 20s
             retries: 15
+        networks:
+            - symfony1-network
+#            - symfony1-app-network
+    symfony1-nodejs-service:
+        image: library/node:23.5
+        container_name: symfony1-nodejs-container
+        volumes:
+            - ../../:/var/www/symfony1
+        working_dir: /var/www/symfony1
+        tty: true
+#        user: $UID:$GID
         networks:
             - symfony1-network
 #            - symfony1-app-network
