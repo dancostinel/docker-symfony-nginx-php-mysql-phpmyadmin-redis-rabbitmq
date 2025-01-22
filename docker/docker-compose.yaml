@@ -1,6 +1,7 @@
 #version: '3'
 volumes:
     mysql_data:
+    grafana-data:
 services:
     symfony1-nginx-service:
         build:
@@ -103,6 +104,43 @@ services:
         networks:
             - symfony1-network
 #            - symfony1-app-network
+    symfony1-elasticsearch-service:
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.10.2
+        container_name: symfony1-elasticsearch-container
+        environment:
+            - discovery.type=single-node
+            - xpack.security.enabled=false
+        ports: ["9201:9200"]
+        networks:
+            - symfony1-network
+    symfony1-kibana-service:
+        image: docker.elastic.co/kibana/kibana:8.10.2
+        container_name: symfony1-kibana-container
+        ports: ["5611:5601"]
+        depends_on:
+            - symfony1-elasticsearch-service
+        environment:
+            - ELASTICSEARCH_HOSTS=http://symfony1-elasticsearch-container:9201
+        networks:
+            - symfony1-network
+    symfony1-logstash-service:
+        image: docker.elastic.co/logstash/logstash:8.10.2
+        container_name: symfony1-logstash-container
+        volumes:
+            - ./logstash/logstash.conf:/usr/share/logstash/pipeline/logstash.conf
+        ports: ["5500:5000"]
+        depends_on:
+            - symfony1-elasticsearch-service
+        networks:
+            - symfony1-network
+    symfony1-grafana-service:
+        image: grafana/grafana:latest
+        container_name: symfony1-grafana-container
+        ports: ["3300:3000"]
+        volumes:
+            - grafana-data:/var/lib/grafana
+        networks:
+            - symfony1-network
 networks:
     symfony1-network:
         driver: bridge
